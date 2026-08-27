@@ -315,6 +315,7 @@ public final class MainActivity extends Activity {
         side.addView(sideButton("系统设置", "⚙", this::openSystemSettings));
         side.addView(sideButton("清理后台", "◌", this::showActivityMonitor));
         side.addView(sideButton("文件分发", "⌁", this::showFileDistribution));
+        side.addView(sideButton("退出 KEMI Pads", "⏻", this::exitApplication));
         scroll.addView(side);
         updateUsbState(false);
         return scroll;
@@ -1251,6 +1252,18 @@ public final class MainActivity extends Activity {
     private void launchPackage(String packageName) {
         Intent intent = getPackageManager().getLaunchIntentForPackage(packageName);
         if (intent != null) startActivity(intent); else message("系统中未找到该功能");
+    }
+
+    private void exitApplication() {
+        ActivityManager manager = getSystemService(ActivityManager.class);
+        if (manager != null) {
+            List<ActivityManager.AppTask> tasks = manager.getAppTasks();
+            if (tasks != null && !tasks.isEmpty()) {
+                for (ActivityManager.AppTask task : tasks) task.finishAndRemoveTask();
+                return;
+            }
+        }
+        finishAndRemoveTask();
     }
 
     private void showFileDistribution() {

@@ -182,8 +182,6 @@ public final class DestinationPickerActivity extends Activity {
 
     private void transfer() {
         if (current == null || sources.isEmpty()) return;
-        getSharedPreferences(PICKER_PREFS, MODE_PRIVATE).edit()
-                .putString(move ? LAST_MOVE_DIRECTORY : LAST_COPY_DIRECTORY, current.getAbsolutePath()).apply();
         confirm.setEnabled(false);
         confirm.setText(move ? "正在剪切…" : "正在复制…");
         status.setText("正在处理，请不要拔出 U 盘…");
@@ -194,6 +192,11 @@ public final class DestinationPickerActivity extends Activity {
         new Thread(() -> {
             int completed = FileOperations.transfer(sources, destination, move);
             runOnUiThread(() -> {
+                if (completed > 0) {
+                    getSharedPreferences(PICKER_PREFS, MODE_PRIVATE).edit()
+                            .putString(move ? LAST_MOVE_DIRECTORY : LAST_COPY_DIRECTORY,
+                                    destination.getAbsolutePath()).apply();
+                }
                 sendBroadcast(new Intent(ACTION_COMPLETED).setPackage(getPackageName()).putExtra(EXTRA_COMPLETED, completed));
                 finish();
             });
