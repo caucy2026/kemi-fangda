@@ -1,0 +1,32 @@
+apply plugin: "com.android.application"
+
+android {
+    namespace "com.kemi.mypad"
+    compileSdk 36
+    buildToolsVersion "36.0.0"
+
+    defaultConfig {
+        applicationId "com.kemi.mypad"
+        minSdk 31
+        targetSdk 31
+        versionCode 10000
+        versionName "1.0.0"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    lint {
+        // KEMI Pads v1 targets the fixed Android 12 system image used by the dual-screen hardware.
+        disable "ExpiredTargetSdkVersion"
+    }
+}
