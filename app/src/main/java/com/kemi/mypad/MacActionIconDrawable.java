@@ -10,7 +10,7 @@ import android.graphics.drawable.Drawable;
 
 /** Consistent macOS-style outline icons for the file context menu. */
 final class MacActionIconDrawable extends Drawable {
-    enum Kind { COPY, CUT, DELETE, REFRESH }
+    enum Kind { COPY, CUT, DELETE, REFRESH, OPEN, CACHE }
 
     private final Kind kind;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -32,6 +32,8 @@ final class MacActionIconDrawable extends Drawable {
             case CUT: drawCut(canvas, w, h); break;
             case DELETE: drawDelete(canvas, w, h); break;
             case REFRESH: drawRefresh(canvas, w, h); break;
+            case OPEN: drawOpen(canvas, w, h); break;
+            case CACHE: drawCache(canvas, w, h); break;
         }
         canvas.restore();
     }
@@ -71,6 +73,21 @@ final class MacActionIconDrawable extends Drawable {
         path.close();
         c.drawPath(path, paint);
         paint.setStyle(Paint.Style.STROKE);
+    }
+
+    private void drawOpen(Canvas c, float w, float h) {
+        c.drawRoundRect(new RectF(w * .15f, h * .22f, w * .78f, h * .84f), w * .08f, w * .08f, paint);
+        c.drawLine(w * .42f, h * .57f, w * .87f, h * .12f, paint);
+        c.drawLine(w * .61f, h * .12f, w * .87f, h * .12f, paint);
+        c.drawLine(w * .87f, h * .12f, w * .87f, h * .38f, paint);
+    }
+
+    private void drawCache(Canvas c, float w, float h) {
+        c.drawOval(new RectF(w * .14f, h * .12f, w * .86f, h * .42f), paint);
+        c.drawArc(new RectF(w * .14f, h * .30f, w * .86f, h * .60f), 0, 180, false, paint);
+        c.drawArc(new RectF(w * .14f, h * .50f, w * .86f, h * .80f), 0, 180, false, paint);
+        c.drawLine(w * .14f, h * .27f, w * .14f, h * .66f, paint);
+        c.drawLine(w * .86f, h * .27f, w * .86f, h * .66f, paint);
     }
 
     @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); invalidateSelf(); }

@@ -108,6 +108,9 @@ public final class MainActivity extends Activity {
     private static final String PREFS = "my_pad";
     private static final String RECENT_KEY = "recent_paths";
     private static final String FAVORITES_KEY = "favorite_paths";
+    private static final String DEVICE_SOURCE_PACKAGE = "com.huanglong.portui";
+    private static final String LAST_SECONDARY_PACKAGE = "last_secondary_package";
+    private static final String LAST_SECONDARY_LAUNCH_TIME = "last_secondary_launch_time";
     private static final long INSTALLED_PHYSICAL_MEMORY = 6L * 1024 * 1024 * 1024;
     private static final long CONFIGURED_SWAP_MEMORY = 2L * 1024 * 1024 * 1024;
 
@@ -145,6 +148,17 @@ public final class MainActivity extends Activity {
     private final List<File> pendingFiles = new ArrayList<>();
     private boolean pendingMove;
     private ActionMode selectionMode;
+    private long stopwatchStartedAt;
+    private long stopwatchElapsed;
+    private boolean stopwatchRunning;
+    private TextView stopwatchDisplay;
+    private final Runnable stopwatchTicker = new Runnable() {
+        @Override public void run() {
+            if (!stopwatchRunning || stopwatchDisplay == null) return;
+            stopwatchDisplay.setText(formatStopwatch(stopwatchElapsed + SystemClock.elapsedRealtime() - stopwatchStartedAt));
+            handler.postDelayed(this, 10);
+        }
+    };
     private String currentSection = "下载";
     private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -312,6 +326,7 @@ public final class MainActivity extends Activity {
         side.addView(sideLabel("系统原有功能"));
         side.addView(sideButton("双屏管理", "▣", this::showDualScreenManager));
         side.addView(sideButton("全部应用", "▦", this::showInstalledApps));
+        side.addView(sideButton("工具集", "⌘", this::showTools));
         side.addView(sideButton("系统设置", "⚙", this::openSystemSettings));
         side.addView(sideButton("清理后台", "◌", this::showActivityMonitor));
         side.addView(sideButton("文件分发", "⌁", this::showFileDistribution));
@@ -1122,7 +1137,7 @@ public final class MainActivity extends Activity {
         breadcrumbView.setText("系统  ›  全部应用");
         useSectionToolbar(null, null, true);
         refreshToolbarButton.setOnClickListener(v -> showInstalledApps());
-        setHeader("应用名称", "版本", "占用", externalDisplayId() >= 0 ? "副屏" : "操作");
+        setHeader("应用名称", "版本", "占用", "操作");
         fileList.removeAllViews();
 
         PackageManager pm = getPackageManager();
@@ -1163,7 +1178,7 @@ public final class MainActivity extends Activity {
         row.addView(text(version == null ? "—" : version, 12, MUTED, false), new LinearLayout.LayoutParams(dp(130), ViewGroup.LayoutParams.WRAP_CONTENT));
         row.addView(text(formatBytes(apkBytes), 12, MUTED, false), new LinearLayout.LayoutParams(dp(100), ViewGroup.LayoutParams.WRAP_CONTENT));
         int secondDisplay = externalDisplayId();
-        Button open = smallActionButton(secondDisplay >= 0 ? "副屏打开" : "打开", BLUE);
+        Button open = smallActionButton(secondDisplay >= 0 ? "副屏" : "打开", BLUE);
         Runnable launch = () -> {
             Intent intent = pm.getLaunchIntentForPackage(info.activityInfo.packageName);
             if (intent != null) startActivity(intent); else message("该应用没有可打开的界面");
@@ -1179,13 +1194,169 @@ public final class MainActivity extends Activity {
                 ActivityOptions options = ActivityOptions.makeBasic();
                 options.setLaunchDisplayId(secondDisplay);
                 startActivity(intent, options.toBundle());
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putString(LAST_SECONDARY_PACKAGE, info.activityInfo.packageName)
+                        .putLong(LAST_SECONDARY_LAUNCH_TIME, System.currentTimeMillis()).apply();
             } catch (Exception error) {
                 message("该应用暂不支持在副屏启动");
             }
         });
-        row.addView(open, new LinearLayout.LayoutParams(dp(92), dp(46)));
+        LinearLayout actions = horizontal(Color.TRANSPARENT);
+        actions.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
+        actions.addView(open, new LinearLayout.LayoutParams(dp(58), dp(42)));
+        Button more = smallActionButton("•••", TEXT);
+        more.setContentDescription("更多应用操作");
+        more.setOnClickListener(v -> showAppActions(more, info, pm));
+        LinearLayout.LayoutParams moreLp = new LinearLayout.LayoutParams(dp(46), dp(42));
+        moreLp.leftMargin = dp(5); actions.addView(more, moreLp);
+        row.addView(actions, new LinearLayout.LayoutParams(dp(112), dp(46)));
         row.setOnClickListener(v -> launch.run());
         return row;
+    }
+
+    private void showAppActions(View anchor, ResolveInfo info, PackageManager pm) {
+        String packageName = info.activityInfo.packageName;
+        ApplicationInfo app = info.activityInfo.applicationInfo;
+        boolean system = (app.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+        boolean self = packageName.equals(getPackageName());
+        LinearLayout panel = vertical(Color.TRANSPARENT);
+        panel.setPadding(dp(6), dp(6), dp(6), dp(6));
+        int width = dp(215), height = dp(154);
+        PopupWindow popup = new PopupWindow(panel, width, height, true);
+        panel.addView(macMenuRow(MacActionIconDrawable.Kind.OPEN, "打开", true, () -> {
+            popup.dismiss(); Intent intent = pm.getLaunchIntentForPackage(packageName); if (intent != null) startActivity(intent);
+        }), lpMatch(dp(42)));
+        panel.addView(macMenuRow(MacActionIconDrawable.Kind.CACHE, "清理缓存", !self, () -> {
+            popup.dismiss(); clearAppCache(app, info.loadLabel(pm).toString());
+        }), lpMatch(dp(42)));
+        View separator = new View(this); separator.setBackgroundColor(Color.rgb(229, 232, 236));
+        LinearLayout.LayoutParams sepLp = lpMatch(dp(1)); sepLp.setMargins(dp(8), dp(5), dp(8), dp(5)); panel.addView(separator, sepLp);
+        panel.addView(macMenuRow(MacActionIconDrawable.Kind.DELETE, "卸载", !system && !self, () -> {
+            popup.dismiss(); confirmUninstall(packageName, info.loadLabel(pm).toString());
+        }), lpMatch(dp(42)));
+        popup.setBackgroundDrawable(roundStroke(Color.WHITE, Color.rgb(205, 210, 216), 10));
+        popup.setOutsideTouchable(true); popup.setElevation(dp(12));
+        int[] location = new int[2]; anchor.getLocationOnScreen(location);
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        int x = Math.max(dp(8), Math.min(location[0] + anchor.getWidth() - width, metrics.widthPixels - width - dp(8)));
+        int y = Math.max(dp(16), location[1] - height - dp(4));
+        popup.showAtLocation(anchor, Gravity.TOP | Gravity.START, x, y);
+    }
+
+    private void clearAppCache(ApplicationInfo app, String label) {
+        footerRight.setText("正在清理“" + label + "”缓存…");
+        new Thread(() -> {
+            boolean ok = SystemPrivilege.clearApplicationCache(app.dataDir);
+            runOnUiThread(() -> footerRight.setText(ok ? "“" + label + "”缓存已清理" : "缓存清理失败，请检查系统权限"));
+        }, "kemi-clear-cache").start();
+    }
+
+    private void confirmUninstall(String packageName, String label) {
+        new AlertDialog.Builder(this).setTitle("卸载“" + label + "”？")
+                .setMessage("应用及其本机数据将被移除。系统应用受到保护，不能在这里卸载。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("卸载", (dialog, which) -> new Thread(() -> {
+                    boolean ok = SystemPrivilege.uninstallUserPackage(packageName);
+                    runOnUiThread(() -> { if (ok) showInstalledApps(); else footerRight.setText("卸载失败"); });
+                }, "kemi-uninstall").start()).show();
+    }
+
+    private void showTools() {
+        setActiveSection("工具集");
+        currentDirectory = null;
+        breadcrumbView.setText("系统  ›  工具集");
+        useSectionToolbar(null, null, false);
+        headerView.setVisibility(View.GONE);
+        fileList.removeAllViews();
+
+        LinearLayout stopwatch = vertical(Color.rgb(248, 250, 252));
+        stopwatch.setPadding(dp(22), dp(18), dp(22), dp(18));
+        stopwatch.setBackground(roundStroke(Color.rgb(248, 250, 252), BORDER, 14));
+        stopwatch.addView(text("秒表 · 1/100 秒", 13, MUTED, true));
+        stopwatchDisplay = centerText(currentStopwatchText(), 42, TEXT, false);
+        stopwatchDisplay.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+        stopwatch.addView(stopwatchDisplay, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(72)));
+        LinearLayout controls = horizontal(Color.TRANSPARENT); controls.setGravity(Gravity.CENTER);
+        Button reset = smallActionButton("复位", MUTED);
+        reset.setOnClickListener(v -> { stopwatchRunning = false; stopwatchElapsed = 0; handler.removeCallbacks(stopwatchTicker); stopwatchDisplay.setText(formatStopwatch(0)); showTools(); });
+        Button start = smallActionButton(stopwatchRunning ? "暂停" : (stopwatchElapsed > 0 ? "继续" : "开始"), stopwatchRunning ? Color.rgb(206, 80, 67) : TEAL);
+        start.setOnClickListener(v -> toggleStopwatch());
+        controls.addView(reset, new LinearLayout.LayoutParams(dp(110), dp(44)));
+        LinearLayout.LayoutParams startLp = new LinearLayout.LayoutParams(dp(110), dp(44)); startLp.leftMargin = dp(14); controls.addView(start, startLp);
+        stopwatch.addView(controls, lpMatch(dp(48)));
+        LinearLayout.LayoutParams watchLp = lpMatch(dp(180)); watchLp.setMargins(dp(8), dp(8), dp(8), dp(10)); fileList.addView(stopwatch, watchLp);
+
+        fileList.addView(text("PAD 常用工具", 12, MUTED, true), lpMatch(dp(30)));
+        LinearLayout quick = horizontal(Color.TRANSPARENT);
+        quick.addView(toolCard("计算器", "快速计算", () -> launchCalculator()), weightedCard());
+        quick.addView(toolCard("时钟与闹钟", "计时、提醒", () -> launchClock()), weightedCard());
+        quick.addView(toolCard("屏幕常亮", isScreenKeptOn() ? "已开启" : "点击开启", this::toggleKeepScreenOn), weightedCard());
+        quick.addView(toolCard("显示设置", "亮度与休眠", () -> startActivity(new Intent(Settings.ACTION_DISPLAY_SETTINGS))), weightedCard());
+        quick.addView(toolCard("声音设置", "音量与提示音", () -> startActivity(new Intent(Settings.ACTION_SOUND_SETTINGS))), weightedCard());
+        LinearLayout.LayoutParams quickLp = lpMatch(dp(112)); quickLp.setMargins(dp(5), 0, dp(5), dp(8)); fileList.addView(quick, quickLp);
+        footerLeft.setText("5 个常用工具");
+        footerRight.setText("秒表按单调时钟计时，每 10 ms 刷新一次显示");
+        updateNavigationButtons();
+        if (stopwatchRunning) { handler.removeCallbacks(stopwatchTicker); handler.post(stopwatchTicker); }
+    }
+
+    private View toolCard(String title, String detail, Runnable action) {
+        LinearLayout card = vertical(Color.rgb(248, 250, 252));
+        card.setGravity(Gravity.CENTER); card.setPadding(dp(8), dp(10), dp(8), dp(10));
+        card.setBackground(ripple(Color.rgb(248, 250, 252), 13));
+        TextView name = centerText(title, 14, TEXT, true); card.addView(name);
+        TextView sub = centerText(detail, 10, MUTED, false); sub.setPadding(0, dp(8), 0, 0); card.addView(sub);
+        card.setOnClickListener(v -> action.run());
+        return card;
+    }
+
+    private void toggleStopwatch() {
+        if (stopwatchRunning) {
+            stopwatchElapsed += SystemClock.elapsedRealtime() - stopwatchStartedAt;
+            stopwatchRunning = false;
+            handler.removeCallbacks(stopwatchTicker);
+        } else {
+            stopwatchStartedAt = SystemClock.elapsedRealtime();
+            stopwatchRunning = true;
+        }
+        showTools();
+    }
+
+    private String currentStopwatchText() {
+        long elapsed = stopwatchElapsed + (stopwatchRunning ? SystemClock.elapsedRealtime() - stopwatchStartedAt : 0);
+        return formatStopwatch(elapsed);
+    }
+
+    private String formatStopwatch(long millis) {
+        long hundredths = Math.max(0, millis) / 10;
+        long hours = hundredths / 360000;
+        long minutes = (hundredths / 6000) % 60;
+        long seconds = (hundredths / 100) % 60;
+        return String.format(Locale.CHINA, "%02d:%02d:%02d.%02d", hours, minutes, seconds, hundredths % 100);
+    }
+
+    private void launchCalculator() {
+        String[] packages = {"com.android.calculator2", "com.google.android.calculator"};
+        for (String pkg : packages) {
+            Intent intent = getPackageManager().getLaunchIntentForPackage(pkg);
+            if (intent != null) { startActivity(intent); return; }
+        }
+        message("系统未安装计算器");
+    }
+
+    private void launchClock() {
+        try { startActivity(new Intent("android.intent.action.SHOW_ALARMS")); }
+        catch (Exception error) { message("系统未安装时钟"); }
+    }
+
+    private boolean isScreenKeptOn() {
+        return (getWindow().getAttributes().flags & android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0;
+    }
+
+    private void toggleKeepScreenOn() {
+        if (isScreenKeptOn()) getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        else getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        showTools();
     }
 
     private void openSystemSettings() {
@@ -1653,6 +1824,12 @@ public final class MainActivity extends Activity {
             snapshot.activeDisplayCount++;
             if (display.getDisplayId() != Display.DEFAULT_DISPLAY) snapshot.externalDisplayId = display.getDisplayId();
         }
+        Map<Integer, String> privilegedTasks = SystemPrivilege.foregroundPackagesByDisplay();
+        for (Map.Entry<Integer, String> task : privilegedTasks.entrySet()) {
+            String role = task.getKey() == Display.DEFAULT_DISPLAY ? "主屏前台" : "副屏前台";
+            result.put(task.getValue(), role);
+            snapshot.screenApps.put(role, appLabel(new String[]{task.getValue()}, task.getValue()));
+        }
         try {
             List<ActivityManager.RunningTaskInfo> tasks = manager.getRunningTasks(20);
             if (tasks != null) for (ActivityManager.RunningTaskInfo task : tasks) {
@@ -1660,13 +1837,35 @@ public final class MainActivity extends Activity {
                 String packageName = task.topActivity.getPackageName();
                 int displayId = runningTaskDisplayId(task);
                 String role = displayId == Display.DEFAULT_DISPLAY ? "主屏前台" : "副屏前台";
-                result.put(packageName, role);
-                snapshot.screenApps.put(role, appLabel(new String[]{packageName}, packageName));
+                if (!snapshot.screenApps.containsKey(role)) {
+                    result.put(packageName, role);
+                    snapshot.screenApps.put(role, appLabel(new String[]{packageName}, packageName));
+                }
             }
         } catch (Exception ignored) { }
         addLikelyScreenAppsFromUsage(result, snapshot);
+        ensureDeviceSecondaryForeground(result, snapshot);
         snapshot.screenPackages.putAll(result);
         return result;
+    }
+
+    private void ensureDeviceSecondaryForeground(Map<String, String> screenApps, MonitorSnapshot snapshot) {
+        if (snapshot.activeDisplayCount < 2 || screenApps.containsValue("副屏前台")) return;
+
+        android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String lastPackage = prefs.getString(LAST_SECONDARY_PACKAGE, "");
+        long launchedAt = prefs.getLong(LAST_SECONDARY_LAUNCH_TIME, 0);
+        boolean recentlyLaunched = !lastPackage.isEmpty()
+                && System.currentTimeMillis() - launchedAt < 2 * 60 * 1000L
+                && getPackageManager().getLaunchIntentForPackage(lastPackage) != null;
+        String packageName = recentlyLaunched ? lastPackage : DEVICE_SOURCE_PACKAGE;
+        try {
+            getPackageManager().getApplicationInfo(packageName, 0);
+        } catch (Exception ignored) {
+            return;
+        }
+        screenApps.put(packageName, "副屏前台");
+        snapshot.screenApps.put("副屏前台", appLabel(new String[]{packageName}, packageName));
     }
 
     private void ensureScreenProcessEntries(MonitorSnapshot snapshot) {
@@ -1730,7 +1929,7 @@ public final class MainActivity extends Activity {
     }
 
     private void addLikelyScreenAppsFromUsage(Map<String, String> screenApps, MonitorSnapshot snapshot) {
-        if (snapshot.activeDisplayCount < 2 || !hasUsageAccess()) return;
+        if (snapshot.activeDisplayCount < 2 || screenApps.containsValue("副屏前台") || !hasUsageAccess()) return;
         UsageStatsManager usage = getSystemService(UsageStatsManager.class);
         if (usage == null) return;
         long now = System.currentTimeMillis();
@@ -2219,7 +2418,11 @@ public final class MainActivity extends Activity {
 
     private String appLabel(String[] packages, String fallback) {
         PackageManager pm = getPackageManager();
-        for (String pkg : packages) try { return pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString(); } catch (Exception ignored) { }
+        for (String pkg : packages) {
+            if ("com.huanglong.portui".equals(pkg)) return "Source";
+            if ("com.newlinksz.kemi.remote".equals(pkg)) return "KEMI 远程办公";
+            try { return pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString(); } catch (Exception ignored) { }
+        }
         return fallback;
     }
 
