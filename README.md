@@ -26,7 +26,7 @@ KEMI Pads 是为 KEMI 双屏 Android PAD 定制的一体化文件与系统管理
 - 双屏应用启动和主屏/副屏前台进程保护
 - 基于设备系统权限通道读取每个 Display 的真实前台任务，不依赖安装目录
 - 全部应用支持主屏/副屏打开、清理缓存和卸载；系统应用与自身受到保护
-- 工具集提供百分之一秒秒表、计算器、时钟、屏幕常亮、显示和声音快捷入口
+- 工具集提供百分之一秒秒表（数字与圆形表盘同步、计次）和内置计算器
 - CPU、内存、交换分区、存储、电池、温度、网络和活动进程监控
 - 局域网 HTTP 文件浏览、下载和本机下载目录分发
 - KEMI Send 自动发现与收发入口
@@ -52,15 +52,25 @@ macOS / Linux：
 
 ```bash
 ./gradlew assembleDebug
-./gradlew assembleRelease
 ```
 
 Windows：
 
 ```bat
 gradlew.bat assembleDebug
-gradlew.bat assembleRelease
 ```
+
+Debug 包只用于普通功能开发。正式 Release 必须使用 KEMI 固件对应的平台证书，构建脚本不会生成未签名或错误签名的 Release：
+
+```bash
+KEMI_PLATFORM_KEYSTORE=/安全位置/debug.keystore \
+KEMI_PLATFORM_STORE_PASSWORD=你的密码 \
+KEMI_PLATFORM_KEY_ALIAS=androiddebugkey \
+KEMI_PLATFORM_KEY_PASSWORD=你的密码 \
+./gradlew assembleRelease
+```
+
+平台私钥和密码不得提交到 Git。构建后应使用 Android SDK 的 `apksigner verify --print-certs` 核对证书摘要，再安装到目标设备。
 
 输出位置：
 
@@ -79,7 +89,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ### KEMI PAD 系统权限
 
-目标固件提供 `/system/xbin/su` 系统管理通道。KEMI Pads 即使正常安装在 `/data/app`，也会通过该通道读取真实双屏任务栈，并执行受控的应用缓存清理和用户应用卸载；权限能力不依赖 APK 的安装目录。普通 Android 设备没有此通道时，文件管理等常规功能仍可使用，但系统级操作会显示失败且不会降级为危险的猜测结果。
+系统能力来自与目标固件一致的平台证书，而不是 APK 文件名、安装目录或 `/system/xbin/su`。平台签名版即使安装在 `/data/app`，也能取得固件授予的 `REAL_GET_TASKS`、`DUMP`、`FORCE_STOP_PACKAGES` 等签名权限；应用通过 Android 系统 API 读取每个 Display 的真实前台任务和活动进程。目标设备上的 `su` 仅允许 root/shell 组执行，普通应用 UID 不具备该能力，因此业务代码不得依赖它。
+
+系统清理只有在所有亮屏都取得权威前台任务时才会启用；任一显示器任务缺失时自动禁止清理，避免误杀主屏或副屏正在运行的应用。普通签名安装时，文件管理等常规功能仍可使用，系统级操作保持禁用，不使用历史记录或写死包名冒充实时结果。
 
 ## 正式版本
 

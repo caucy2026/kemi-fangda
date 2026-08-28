@@ -152,10 +152,22 @@ public final class MainActivity extends Activity {
     private long stopwatchElapsed;
     private boolean stopwatchRunning;
     private TextView stopwatchDisplay;
+    private StopwatchDialView stopwatchDial;
+    private TextView stopwatchLapSummary;
+    private final List<Long> stopwatchLaps = new ArrayList<>();
+    private TextView calculatorDisplay;
+    private TextView calculatorHistoryView;
+    private String calculatorInput = "0";
+    private String calculatorHistory = "";
+    private double calculatorAccumulator;
+    private String calculatorOperator = "";
+    private boolean calculatorReplaceInput;
     private final Runnable stopwatchTicker = new Runnable() {
         @Override public void run() {
             if (!stopwatchRunning || stopwatchDisplay == null) return;
-            stopwatchDisplay.setText(formatStopwatch(stopwatchElapsed + SystemClock.elapsedRealtime() - stopwatchStartedAt));
+            long elapsed = stopwatchElapsed + SystemClock.elapsedRealtime() - stopwatchStartedAt;
+            stopwatchDisplay.setText(formatStopwatch(elapsed));
+            if (stopwatchDial != null) stopwatchDial.setElapsedMillis(elapsed);
             handler.postDelayed(this, 10);
         }
     };
@@ -410,11 +422,15 @@ public final class MainActivity extends Activity {
     private Button sideButton(String label, String symbol, Runnable action) {
         Button button = new Button(this);
         button.setAllCaps(false);
-        button.setText(sideText(symbol, label));
+        button.setText(label);
         button.setTextSize(14);
         button.setTextColor(TEXT);
         button.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
-        button.setPadding(dp(12), 0, dp(8), 0);
+        button.setPadding(dp(14), 0, dp(8), 0);
+        button.setCompoundDrawablePadding(dp(12));
+        SidebarIconDrawable icon = new SidebarIconDrawable(sidebarIconKind(label), TEXT);
+        icon.setBounds(0, 0, dp(24), dp(24));
+        button.setCompoundDrawables(icon, null, null, null);
         button.setBackground(ripple(Color.TRANSPARENT, 10));
         button.setOnClickListener(v -> {
             if (selectionMode != null) selectionMode.finish();
@@ -422,6 +438,28 @@ public final class MainActivity extends Activity {
         });
         sidebarButtons.put(label, button);
         return button;
+    }
+
+    private SidebarIconDrawable.Kind sidebarIconKind(String label) {
+        if ("最近使用".equals(label)) return SidebarIconDrawable.Kind.RECENT;
+        if ("下载".equals(label)) return SidebarIconDrawable.Kind.DOWNLOAD;
+        if ("收藏".equals(label)) return SidebarIconDrawable.Kind.FAVORITE;
+        if ("本机文件".equals(label)) return SidebarIconDrawable.Kind.STORAGE;
+        if ("USB 移动盘".equals(label)) return SidebarIconDrawable.Kind.USB;
+        if ("局域网文件".equals(label)) return SidebarIconDrawable.Kind.NETWORK;
+        if ("双屏管理".equals(label)) return SidebarIconDrawable.Kind.SCREENS;
+        if ("全部应用".equals(label)) return SidebarIconDrawable.Kind.APPS;
+        if ("工具集".equals(label)) return SidebarIconDrawable.Kind.TOOLS;
+        if ("系统设置".equals(label)) return SidebarIconDrawable.Kind.SETTINGS;
+        if ("清理后台".equals(label)) return SidebarIconDrawable.Kind.CLEAN;
+        if ("文件分发".equals(label)) return SidebarIconDrawable.Kind.SEND;
+        return SidebarIconDrawable.Kind.EXIT;
+    }
+
+    private void tintSidebarIcon(Button button, int color) {
+        if (button == null) return;
+        android.graphics.drawable.Drawable[] values = button.getCompoundDrawables();
+        if (values[0] != null) values[0].setTint(color);
     }
 
     private CharSequence sideText(String symbol, String label) {
@@ -436,11 +474,13 @@ public final class MainActivity extends Activity {
         for (Map.Entry<String, Button> entry : sidebarButtons.entrySet()) {
             boolean active = label.equals(entry.getKey());
             entry.getValue().setTextColor(active ? Color.rgb(9, 109, 101) : TEXT);
+            tintSidebarIcon(entry.getValue(), active ? Color.rgb(9, 109, 101) : TEXT);
             entry.getValue().setTypeface(Typeface.DEFAULT, active ? Typeface.BOLD : Typeface.NORMAL);
             entry.getValue().setBackground(ripple(active ? Color.rgb(204, 236, 232) : Color.TRANSPARENT, 10));
         }
         if (Boolean.TRUE.equals(lastUsbAvailable) && usbButton != null && !"USB 移动盘".equals(label)) {
             usbButton.setTextColor(Color.rgb(9, 109, 101));
+            tintSidebarIcon(usbButton, Color.rgb(9, 109, 101));
             usbButton.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
             usbButton.setBackground(ripple(Color.rgb(224, 243, 240), 10));
         }
@@ -599,13 +639,16 @@ public final class MainActivity extends Activity {
         } else {
             usbButton.setContentDescription("USB 移动盘未连接");
         }
-        usbButton.setText(sideText("▱", usbLabel));
+        usbButton.setText(usbLabel);
         if (available) {
             usbButton.setTextColor(Color.rgb(9, 109, 101));
+            tintSidebarIcon(usbButton, Color.rgb(9, 109, 101));
             usbButton.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
             usbButton.setBackground(ripple("USB 移动盘".equals(currentSection)
                     ? Color.rgb(204, 236, 232) : Color.rgb(224, 243, 240), 10));
         } else {
+            usbButton.setTextColor(TEXT);
+            tintSidebarIcon(usbButton, TEXT);
             usbButton.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
         }
         if (available && "USB 移动盘".equals(currentSection)) {
@@ -1246,7 +1289,7 @@ public final class MainActivity extends Activity {
     private void clearAppCache(ApplicationInfo app, String label) {
         footerRight.setText("正在清理“" + label + "”缓存…");
         new Thread(() -> {
-            boolean ok = SystemPrivilege.clearApplicationCache(app.dataDir);
+            boolean ok = SystemPrivilege.clearApplicationCache(this, app.packageName);
             runOnUiThread(() -> footerRight.setText(ok ? "“" + label + "”缓存已清理" : "缓存清理失败，请检查系统权限"));
         }, "kemi-clear-cache").start();
     }
@@ -1256,7 +1299,7 @@ public final class MainActivity extends Activity {
                 .setMessage("应用及其本机数据将被移除。系统应用受到保护，不能在这里卸载。")
                 .setNegativeButton("取消", null)
                 .setPositiveButton("卸载", (dialog, which) -> new Thread(() -> {
-                    boolean ok = SystemPrivilege.uninstallUserPackage(packageName);
+                    boolean ok = SystemPrivilege.uninstallUserPackage(this, packageName);
                     runOnUiThread(() -> { if (ok) showInstalledApps(); else footerRight.setText("卸载失败"); });
                 }, "kemi-uninstall").start()).show();
     }
@@ -1264,50 +1307,188 @@ public final class MainActivity extends Activity {
     private void showTools() {
         setActiveSection("工具集");
         currentDirectory = null;
-        breadcrumbView.setText("系统  ›  工具集");
+        breadcrumbView.setText("工具集");
         useSectionToolbar(null, null, false);
         headerView.setVisibility(View.GONE);
         fileList.removeAllViews();
 
-        LinearLayout stopwatch = vertical(Color.rgb(248, 250, 252));
-        stopwatch.setPadding(dp(22), dp(18), dp(22), dp(18));
-        stopwatch.setBackground(roundStroke(Color.rgb(248, 250, 252), BORDER, 14));
-        stopwatch.addView(text("秒表 · 1/100 秒", 13, MUTED, true));
-        stopwatchDisplay = centerText(currentStopwatchText(), 42, TEXT, false);
-        stopwatchDisplay.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
-        stopwatch.addView(stopwatchDisplay, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(72)));
-        LinearLayout controls = horizontal(Color.TRANSPARENT); controls.setGravity(Gravity.CENTER);
-        Button reset = smallActionButton("复位", MUTED);
-        reset.setOnClickListener(v -> { stopwatchRunning = false; stopwatchElapsed = 0; handler.removeCallbacks(stopwatchTicker); stopwatchDisplay.setText(formatStopwatch(0)); showTools(); });
-        Button start = smallActionButton(stopwatchRunning ? "暂停" : (stopwatchElapsed > 0 ? "继续" : "开始"), stopwatchRunning ? Color.rgb(206, 80, 67) : TEAL);
-        start.setOnClickListener(v -> toggleStopwatch());
-        controls.addView(reset, new LinearLayout.LayoutParams(dp(110), dp(44)));
-        LinearLayout.LayoutParams startLp = new LinearLayout.LayoutParams(dp(110), dp(44)); startLp.leftMargin = dp(14); controls.addView(start, startLp);
-        stopwatch.addView(controls, lpMatch(dp(48)));
-        LinearLayout.LayoutParams watchLp = lpMatch(dp(180)); watchLp.setMargins(dp(8), dp(8), dp(8), dp(10)); fileList.addView(stopwatch, watchLp);
+        LinearLayout workspace = horizontal(Color.WHITE);
+        workspace.setGravity(Gravity.TOP);
 
-        fileList.addView(text("PAD 常用工具", 12, MUTED, true), lpMatch(dp(30)));
-        LinearLayout quick = horizontal(Color.TRANSPARENT);
-        quick.addView(toolCard("计算器", "快速计算", () -> launchCalculator()), weightedCard());
-        quick.addView(toolCard("时钟与闹钟", "计时、提醒", () -> launchClock()), weightedCard());
-        quick.addView(toolCard("屏幕常亮", isScreenKeptOn() ? "已开启" : "点击开启", this::toggleKeepScreenOn), weightedCard());
-        quick.addView(toolCard("显示设置", "亮度与休眠", () -> startActivity(new Intent(Settings.ACTION_DISPLAY_SETTINGS))), weightedCard());
-        quick.addView(toolCard("声音设置", "音量与提示音", () -> startActivity(new Intent(Settings.ACTION_SOUND_SETTINGS))), weightedCard());
-        LinearLayout.LayoutParams quickLp = lpMatch(dp(112)); quickLp.setMargins(dp(5), 0, dp(5), dp(8)); fileList.addView(quick, quickLp);
-        footerLeft.setText("5 个常用工具");
-        footerRight.setText("秒表按单调时钟计时，每 10 ms 刷新一次显示");
+        LinearLayout stopwatch = vertical(Color.WHITE);
+        stopwatch.setGravity(Gravity.CENTER_HORIZONTAL);
+        stopwatch.setPadding(dp(24), dp(12), dp(24), dp(10));
+        TextView watchTitle = text("秒表", 18, TEXT, true);
+        watchTitle.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        stopwatch.addView(watchTitle, lpMatch(dp(32)));
+        stopwatchDial = new StopwatchDialView(this);
+        long elapsedNow = stopwatchElapsed + (stopwatchRunning ? SystemClock.elapsedRealtime() - stopwatchStartedAt : 0);
+        stopwatchDial.setElapsedMillis(elapsedNow);
+        stopwatch.addView(stopwatchDial, new LinearLayout.LayoutParams(dp(205), dp(205)));
+        stopwatchDisplay = centerText(currentStopwatchText(), 32, TEXT, false);
+        stopwatchDisplay.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+        stopwatchDisplay.setGravity(Gravity.CENTER);
+        stopwatch.addView(stopwatchDisplay, lpMatch(dp(54)));
+        stopwatchLapSummary = text(stopwatchLapText(), 11, MUTED, false);
+        stopwatchLapSummary.setGravity(Gravity.CENTER);
+        stopwatch.addView(stopwatchLapSummary, lpMatch(dp(20)));
+
+        View watchRule = new View(this); watchRule.setBackgroundColor(BORDER);
+        LinearLayout.LayoutParams watchRuleLp = lpMatch(dp(1)); watchRuleLp.setMargins(0, dp(2), 0, dp(7));
+        stopwatch.addView(watchRule, watchRuleLp);
+        LinearLayout controls = horizontal(Color.TRANSPARENT); controls.setGravity(Gravity.CENTER);
+        Button start = toolControlButton(stopwatchRunning ? "暂停" : (stopwatchElapsed > 0 ? "继续" : "开始"), true,
+                stopwatchRunning ? Color.rgb(213, 73, 64) : BLUE);
+        start.setOnClickListener(v -> toggleStopwatch());
+        Button lap = toolControlButton("计次", false, BLUE);
+        lap.setEnabled(elapsedNow > 0);
+        lap.setAlpha(elapsedNow > 0 ? 1f : .4f);
+        lap.setOnClickListener(v -> recordStopwatchLap());
+        Button reset = toolControlButton("复位", false, TEXT);
+        reset.setOnClickListener(v -> {
+            stopwatchRunning = false; stopwatchElapsed = 0; stopwatchLaps.clear();
+            handler.removeCallbacks(stopwatchTicker); showTools();
+        });
+        controls.addView(start, toolButtonLayout());
+        controls.addView(lap, toolButtonLayout());
+        controls.addView(reset, toolButtonLayout());
+        stopwatch.addView(controls, lpMatch(dp(48)));
+
+        workspace.addView(stopwatch, new LinearLayout.LayoutParams(0, dp(425), 1));
+        View divider = new View(this); divider.setBackgroundColor(BORDER);
+        LinearLayout.LayoutParams dividerLp = new LinearLayout.LayoutParams(dp(1), dp(425));
+        dividerLp.setMargins(dp(2), 0, dp(2), 0); workspace.addView(divider, dividerLp);
+        workspace.addView(buildCalculator(), new LinearLayout.LayoutParams(0, dp(425), 1));
+        LinearLayout.LayoutParams workspaceLp = lpMatch(dp(425)); workspaceLp.setMargins(dp(6), 0, dp(6), 0);
+        fileList.addView(workspace, workspaceLp);
+        footerLeft.setText("2 个内置工具");
+        footerRight.setText("秒表精确到 1/100 秒 · 所有计算仅在本机完成");
         updateNavigationButtons();
         if (stopwatchRunning) { handler.removeCallbacks(stopwatchTicker); handler.post(stopwatchTicker); }
     }
 
-    private View toolCard(String title, String detail, Runnable action) {
-        LinearLayout card = vertical(Color.rgb(248, 250, 252));
-        card.setGravity(Gravity.CENTER); card.setPadding(dp(8), dp(10), dp(8), dp(10));
-        card.setBackground(ripple(Color.rgb(248, 250, 252), 13));
-        TextView name = centerText(title, 14, TEXT, true); card.addView(name);
-        TextView sub = centerText(detail, 10, MUTED, false); sub.setPadding(0, dp(8), 0, 0); card.addView(sub);
-        card.setOnClickListener(v -> action.run());
-        return card;
+    private View buildCalculator() {
+        LinearLayout panel = vertical(Color.WHITE);
+        panel.setPadding(dp(24), dp(12), dp(24), dp(10));
+        panel.addView(text("计算器", 18, TEXT, true), lpMatch(dp(32)));
+        calculatorHistoryView = text(calculatorHistory, 12, MUTED, false);
+        calculatorHistoryView.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
+        calculatorHistoryView.setSingleLine(true);
+        panel.addView(calculatorHistoryView, lpMatch(dp(22)));
+        calculatorDisplay = text(calculatorInput, 36, TEXT, false);
+        calculatorDisplay.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+        calculatorDisplay.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
+        calculatorDisplay.setSingleLine(true);
+        panel.addView(calculatorDisplay, lpMatch(dp(60)));
+        View rule = new View(this); rule.setBackgroundColor(BORDER);
+        LinearLayout.LayoutParams ruleLp = lpMatch(dp(1)); ruleLp.setMargins(0, 0, 0, dp(12)); panel.addView(rule, ruleLp);
+        String[][] keys = {{"C", "±", "%", "÷"}, {"7", "8", "9", "×"}, {"4", "5", "6", "−"}, {"1", "2", "3", "+"}, {"0", "00", ".", "="}};
+        LinearLayout keypad = vertical(Color.TRANSPARENT);
+        for (String[] rowKeys : keys) {
+            LinearLayout row = horizontal(Color.TRANSPARENT);
+            for (String key : rowKeys) {
+                LinearLayout.LayoutParams keyLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1);
+                keyLp.setMargins(dp(5), dp(3), dp(5), dp(3));
+                row.addView(calculatorKey(key), keyLp);
+            }
+            keypad.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        }
+        panel.addView(keypad, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        return panel;
+    }
+
+    private Button calculatorKey(String key) {
+        Button button = new Button(this);
+        button.setAllCaps(false); button.setText(key); button.setTextSize(22); button.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
+        button.setMinWidth(0); button.setMinHeight(0); button.setPadding(0, 0, 0, 0);
+        boolean operator = "÷×−+=".contains(key);
+        button.setTextColor(operator ? ("=".equals(key) ? Color.WHITE : BLUE) : TEXT);
+        button.setBackground(roundStroke("=".equals(key) ? BLUE : operator ? Color.rgb(241, 247, 255) : Color.WHITE,
+                "=".equals(key) ? BLUE : BORDER, 24));
+        button.setOnClickListener(v -> calculatorPress(key));
+        return button;
+    }
+
+    private Button toolControlButton(String label, boolean filled, int color) {
+        Button button = new Button(this);
+        button.setAllCaps(false); button.setText(label); button.setTextSize(16);
+        button.setTextColor(filled ? Color.WHITE : color);
+        button.setMinWidth(0); button.setMinHeight(0); button.setPadding(0, 0, 0, 0);
+        button.setBackground(roundStroke(filled ? color : Color.WHITE, color, 22));
+        return button;
+    }
+
+    private LinearLayout.LayoutParams toolButtonLayout() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(48), 1);
+        lp.setMargins(dp(6), 0, dp(6), 0); return lp;
+    }
+
+    private void recordStopwatchLap() {
+        long elapsed = stopwatchElapsed + (stopwatchRunning ? SystemClock.elapsedRealtime() - stopwatchStartedAt : 0);
+        if (elapsed <= 0) return;
+        stopwatchLaps.add(elapsed);
+        if (stopwatchLapSummary != null) stopwatchLapSummary.setText(stopwatchLapText());
+    }
+
+    private String stopwatchLapText() {
+        if (stopwatchLaps.isEmpty()) return "精确到 1/100 秒";
+        long value = stopwatchLaps.get(stopwatchLaps.size() - 1);
+        return "计次 " + stopwatchLaps.size() + "   " + formatStopwatch(value);
+    }
+
+    private void calculatorPress(String key) {
+        if (key.matches("\\d+")) {
+            if (calculatorReplaceInput || "0".equals(calculatorInput) || "错误".equals(calculatorInput)) calculatorInput = key;
+            else if (calculatorInput.length() < 16) calculatorInput += key;
+            calculatorReplaceInput = false;
+        } else if (".".equals(key)) {
+            if (calculatorReplaceInput || "错误".equals(calculatorInput)) { calculatorInput = "0"; calculatorReplaceInput = false; }
+            if (!calculatorInput.contains(".")) calculatorInput += ".";
+        } else if ("C".equals(key)) {
+            calculatorInput = "0"; calculatorAccumulator = 0; calculatorOperator = ""; calculatorHistory = ""; calculatorReplaceInput = false;
+        } else if ("±".equals(key)) {
+            if (!"0".equals(calculatorInput) && !"错误".equals(calculatorInput)) calculatorInput = calculatorInput.startsWith("-") ? calculatorInput.substring(1) : "-" + calculatorInput;
+        } else if ("%".equals(key)) {
+            try { calculatorInput = calculatorNumber(Double.parseDouble(calculatorInput) / 100d); } catch (Exception ignored) { calculatorInput = "错误"; }
+        } else {
+            String operator = "−".equals(key) ? "-" : key;
+            String shownOperator = "-".equals(operator) ? "−" : operator;
+            String enteredValue = calculatorInput;
+            if (!calculatorOperator.isEmpty() && !calculatorReplaceInput) applyCalculatorOperation();
+            else if (calculatorOperator.isEmpty()) {
+                try { calculatorAccumulator = Double.parseDouble(calculatorInput); } catch (Exception error) { calculatorInput = "错误"; }
+            }
+            if ("=".equals(operator)) {
+                calculatorHistory = calculatorHistory.isEmpty() ? enteredValue + " =" : calculatorHistory + " " + enteredValue + " =";
+                calculatorOperator = "";
+            } else {
+                calculatorHistory = calculatorInput + " " + shownOperator;
+                calculatorOperator = operator;
+            }
+            calculatorReplaceInput = true;
+        }
+        if (calculatorDisplay != null) calculatorDisplay.setText(calculatorInput);
+        if (calculatorHistoryView != null) calculatorHistoryView.setText(calculatorHistory);
+    }
+
+    private void applyCalculatorOperation() {
+        try {
+            double value = Double.parseDouble(calculatorInput);
+            if ("+".equals(calculatorOperator)) calculatorAccumulator += value;
+            else if ("-".equals(calculatorOperator)) calculatorAccumulator -= value;
+            else if ("×".equals(calculatorOperator)) calculatorAccumulator *= value;
+            else if ("÷".equals(calculatorOperator)) {
+                if (value == 0) throw new ArithmeticException("divide by zero");
+                calculatorAccumulator /= value;
+            }
+            calculatorInput = calculatorNumber(calculatorAccumulator);
+        } catch (Exception error) { calculatorInput = "错误"; calculatorOperator = ""; }
+    }
+
+    private String calculatorNumber(double value) {
+        if (!Double.isFinite(value)) return "错误";
+        if (Math.abs(value - Math.rint(value)) < 0.0000000001d) return String.format(Locale.CHINA, "%.0f", value);
+        return String.format(Locale.CHINA, "%.10f", value).replaceAll("0+$", "").replaceAll("\\.$", "");
     }
 
     private void toggleStopwatch() {
@@ -1333,30 +1514,6 @@ public final class MainActivity extends Activity {
         long minutes = (hundredths / 6000) % 60;
         long seconds = (hundredths / 100) % 60;
         return String.format(Locale.CHINA, "%02d:%02d:%02d.%02d", hours, minutes, seconds, hundredths % 100);
-    }
-
-    private void launchCalculator() {
-        String[] packages = {"com.android.calculator2", "com.google.android.calculator"};
-        for (String pkg : packages) {
-            Intent intent = getPackageManager().getLaunchIntentForPackage(pkg);
-            if (intent != null) { startActivity(intent); return; }
-        }
-        message("系统未安装计算器");
-    }
-
-    private void launchClock() {
-        try { startActivity(new Intent("android.intent.action.SHOW_ALARMS")); }
-        catch (Exception error) { message("系统未安装时钟"); }
-    }
-
-    private boolean isScreenKeptOn() {
-        return (getWindow().getAttributes().flags & android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0;
-    }
-
-    private void toggleKeepScreenOn() {
-        if (isScreenKeptOn()) getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        else getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        showTools();
     }
 
     private void openSystemSettings() {
@@ -1768,6 +1925,14 @@ public final class MainActivity extends Activity {
         snapshot.usageAccess = hasUsageAccess();
         if (snapshot.usageAccess) mergeRecentlyActiveApps(snapshot);
         ensureScreenProcessEntries(snapshot);
+        if (!snapshot.taskAccess) {
+            for (ProcessEntry entry : snapshot.processes) {
+                entry.cleanable = false;
+                if (entry.analysisReason.isEmpty() || "可安全释放的普通后台缓存".equals(entry.analysisReason)) {
+                    entry.analysisReason = "未取得真实双屏任务权限，为防误清理已锁定";
+                }
+            }
+        }
         snapshot.processes.sort((a, b) -> Long.compare(b.memoryBytes, a.memoryBytes));
         return snapshot;
     }
@@ -1816,35 +1981,26 @@ public final class MainActivity extends Activity {
 
     private Map<String, String> detectScreenApps(ActivityManager manager, MonitorSnapshot snapshot) {
         Map<String, String> result = new HashMap<>();
+        Set<Integer> requiredDisplayIds = new HashSet<>();
         DisplayManager displays = getSystemService(DisplayManager.class);
         Display[] activeDisplays = displays == null ? new Display[0] : displays.getDisplays();
         snapshot.displayCount = activeDisplays.length;
         for (Display display : activeDisplays) {
             if (display.getState() == Display.STATE_OFF) continue;
             snapshot.activeDisplayCount++;
+            requiredDisplayIds.add(display.getDisplayId());
             if (display.getDisplayId() != Display.DEFAULT_DISPLAY) snapshot.externalDisplayId = display.getDisplayId();
         }
-        Map<Integer, String> privilegedTasks = SystemPrivilege.foregroundPackagesByDisplay();
-        for (Map.Entry<Integer, String> task : privilegedTasks.entrySet()) {
+        Map<Integer, SystemPrivilege.ForegroundTask> privilegedTasks = SystemPrivilege.foregroundTasksByDisplay(this);
+        boolean realTaskPermission = checkSelfPermission("android.permission.REAL_GET_TASKS") == PackageManager.PERMISSION_GRANTED;
+        snapshot.taskAccess = realTaskPermission && !requiredDisplayIds.isEmpty()
+                && privilegedTasks.keySet().containsAll(requiredDisplayIds);
+        for (Map.Entry<Integer, SystemPrivilege.ForegroundTask> task : privilegedTasks.entrySet()) {
+            String packageName = task.getValue().packageName;
             String role = task.getKey() == Display.DEFAULT_DISPLAY ? "主屏前台" : "副屏前台";
-            result.put(task.getValue(), role);
-            snapshot.screenApps.put(role, appLabel(new String[]{task.getValue()}, task.getValue()));
+            result.put(packageName, role);
+            snapshot.screenApps.put(role, appLabel(new String[]{packageName}, packageName));
         }
-        try {
-            List<ActivityManager.RunningTaskInfo> tasks = manager.getRunningTasks(20);
-            if (tasks != null) for (ActivityManager.RunningTaskInfo task : tasks) {
-                if (task.topActivity == null) continue;
-                String packageName = task.topActivity.getPackageName();
-                int displayId = runningTaskDisplayId(task);
-                String role = displayId == Display.DEFAULT_DISPLAY ? "主屏前台" : "副屏前台";
-                if (!snapshot.screenApps.containsKey(role)) {
-                    result.put(packageName, role);
-                    snapshot.screenApps.put(role, appLabel(new String[]{packageName}, packageName));
-                }
-            }
-        } catch (Exception ignored) { }
-        addLikelyScreenAppsFromUsage(result, snapshot);
-        ensureDeviceSecondaryForeground(result, snapshot);
         snapshot.screenPackages.putAll(result);
         return result;
     }
@@ -1985,6 +2141,8 @@ public final class MainActivity extends Activity {
 
     private void renderMonitorSnapshot(MonitorSnapshot snapshot) {
         fileList.removeAllViews();
+        primaryToolbarButton.setEnabled(snapshot.taskAccess);
+        primaryToolbarButton.setAlpha(snapshot.taskAccess ? 1f : .38f);
         LinearLayout metrics = horizontal(Color.TRANSPARENT);
         metrics.setPadding(dp(4), dp(6), dp(4), dp(12));
         long usedMemory = snapshot.totalMemory - snapshot.availableMemory;
@@ -2038,22 +2196,43 @@ public final class MainActivity extends Activity {
         panel.setBackground(roundStroke(Color.rgb(240, 249, 247), Color.rgb(174, 220, 212), 12));
         LinearLayout copy = vertical(Color.TRANSPARENT);
         copy.addView(text("双屏前台保护已开启", 14, Color.rgb(10, 117, 102), true));
-        String main = snapshot.screenApps.getOrDefault("主屏前台", "系统可见应用");
+        String unavailable = snapshot.taskAccess ? "系统未返回" : "系统权限未生效";
+        String main = snapshot.screenApps.getOrDefault("主屏前台", unavailable);
         String secondary = snapshot.activeDisplayCount > 1
-                ? snapshot.screenApps.getOrDefault("副屏前台", "系统可见应用") : "未检测到副屏";
-        TextView detail = text("主屏：" + main + "    副屏：" + secondary, 11, MUTED, false);
-        detail.setPadding(0, dp(7), 0, 0);
-        copy.addView(detail);
+                ? snapshot.screenApps.getOrDefault("副屏前台", unavailable) : "未检测到副屏";
+        LinearLayout screenApps = horizontal(Color.TRANSPARENT);
+        screenApps.setGravity(Gravity.CENTER_VERTICAL);
+        TextView mainApp = screenAppPill("主屏  " + main, false);
+        screenApps.addView(mainApp, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(31)));
+        boolean inspectable = snapshot.taskAccess && snapshot.activeDisplayCount > 1 && snapshot.externalDisplayId >= 0;
+        TextView secondaryApp = screenAppPill("副屏  " + secondary + (inspectable ? "   ›" : ""), inspectable);
+        if (inspectable) {
+            secondaryApp.setContentDescription("查看副屏应用实时信息");
+            int secondaryDisplay = snapshot.externalDisplayId;
+            secondaryApp.setOnClickListener(v -> new SecondaryAppInspectorDialog(this, secondaryDisplay).show());
+        }
+        LinearLayout.LayoutParams secondaryLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(31));
+        secondaryLp.leftMargin = dp(8); screenApps.addView(secondaryApp, secondaryLp);
+        LinearLayout.LayoutParams appsLp = lpMatch(dp(34)); appsLp.topMargin = dp(4); copy.addView(screenApps, appsLp);
         panel.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
         LinearLayout counts = vertical(Color.TRANSPARENT);
         counts.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
-        counts.addView(text("仅 " + cleanable + " 个普通后台可清理", 13, cleanable > 0 ? Color.rgb(190, 112, 20) : TEAL, true));
+        counts.addView(text(snapshot.taskAccess ? "仅 " + cleanable + " 个普通后台可清理" : "系统权限未生效 · 已禁止清理",
+                13, snapshot.taskAccess && cleanable > 0 ? Color.rgb(190, 112, 20) : snapshot.taskAccess ? TEAL : Color.rgb(190, 90, 45), true));
         counts.addView(text("屏幕保护 " + screenProtected + " · 系统 " + systemProtected + " · 服务 " + serviceProtected, 10, MUTED, false));
         panel.addView(counts, new LinearLayout.LayoutParams(dp(330), ViewGroup.LayoutParams.MATCH_PARENT));
         LinearLayout.LayoutParams lp = lpMatch(dp(88));
         lp.setMargins(dp(8), dp(3), dp(8), dp(8));
         panel.setLayoutParams(lp);
         return panel;
+    }
+
+    private TextView screenAppPill(String label, boolean active) {
+        TextView view = text(label, 11, active ? Color.rgb(8, 111, 151) : MUTED, active);
+        view.setGravity(Gravity.CENTER_VERTICAL);
+        view.setPadding(dp(11), 0, dp(11), 0);
+        view.setBackground(ripple(active ? Color.rgb(226, 243, 249) : Color.rgb(235, 240, 242), 9));
+        return view;
     }
 
     private View metricCard(String label, String value, String detail, int accent) {
@@ -2741,6 +2920,7 @@ public final class MainActivity extends Activity {
         long availableStorage;
         boolean lowMemory;
         boolean usageAccess;
+        boolean taskAccess;
         String deviceName = "";
         String androidVersion = "";
         String cpuModel = "";

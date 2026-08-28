@@ -1,5 +1,12 @@
 apply plugin: "com.android.application"
 
+def platformKeystorePath = System.getenv("KEMI_PLATFORM_KEYSTORE")
+def platformStorePassword = System.getenv("KEMI_PLATFORM_STORE_PASSWORD")
+def platformKeyAlias = System.getenv("KEMI_PLATFORM_KEY_ALIAS")
+def platformKeyPassword = System.getenv("KEMI_PLATFORM_KEY_PASSWORD")
+def platformSigningReady = platformKeystorePath != null && platformStorePassword != null
+        && platformKeyAlias != null && platformKeyPassword != null
+
 android {
     namespace "com.kemi.mypad"
     compileSdk 36
@@ -18,15 +25,33 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
+    signingConfigs {
+        if (platformSigningReady) {
+            platform {
+                storeFile file(platformKeystorePath)
+                storePassword platformStorePassword
+                keyAlias platformKeyAlias
+                keyPassword platformKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
-            signingConfig signingConfigs.debug
+            signingConfig platformSigningReady ? signingConfigs.platform : null
         }
     }
 
     lint {
         // KEMI Pads v1 targets the fixed Android 12 system image used by the dual-screen hardware.
         disable "ExpiredTargetSdkVersion"
+    }
+}
+
+gradle.taskGraph.whenReady { graph ->
+    boolean buildingRelease = graph.allTasks.any { it.path.endsWith(":assembleRelease") || it.path.endsWith(":bundleRelease") }
+    if (buildingRelease && !platformSigningReady) {
+        throw new GradleException("Release requires KEMI platform signing environment variables; unsigned fallback is forbidden")
     }
 }
