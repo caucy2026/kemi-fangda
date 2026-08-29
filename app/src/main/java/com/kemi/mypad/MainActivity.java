@@ -162,6 +162,9 @@ public final class MainActivity extends Activity {
     private double calculatorAccumulator;
     private String calculatorOperator = "";
     private boolean calculatorReplaceInput;
+    private boolean calculatorProgrammerMode;
+    private final ProgrammerCalculator programmerCalculator = new ProgrammerCalculator();
+    private final Map<Integer, TextView> programmerRadixValues = new HashMap<>();
     private final Runnable stopwatchTicker = new Runnable() {
         @Override public void run() {
             if (!stopwatchRunning || stopwatchDisplay == null) return;
@@ -1369,8 +1372,10 @@ public final class MainActivity extends Activity {
 
     private View buildCalculator() {
         LinearLayout panel = vertical(Color.WHITE);
-        panel.setPadding(dp(24), dp(12), dp(24), dp(10));
-        panel.addView(text("计算器", 18, TEXT, true), lpMatch(dp(32)));
+        panel.setPadding(dp(16), dp(8), dp(16), dp(8));
+        panel.addView(calculatorModeSwitch(), lpMatch(dp(36)));
+        if (calculatorProgrammerMode) return buildProgrammerCalculator(panel);
+
         calculatorHistoryView = text(calculatorHistory, 12, MUTED, false);
         calculatorHistoryView.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
         calculatorHistoryView.setSingleLine(true);
@@ -1379,10 +1384,10 @@ public final class MainActivity extends Activity {
         calculatorDisplay.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
         calculatorDisplay.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
         calculatorDisplay.setSingleLine(true);
-        panel.addView(calculatorDisplay, lpMatch(dp(60)));
+        panel.addView(calculatorDisplay, lpMatch(dp(52)));
         View rule = new View(this); rule.setBackgroundColor(BORDER);
-        LinearLayout.LayoutParams ruleLp = lpMatch(dp(1)); ruleLp.setMargins(0, 0, 0, dp(12)); panel.addView(rule, ruleLp);
-        String[][] keys = {{"C", "±", "%", "÷"}, {"7", "8", "9", "×"}, {"4", "5", "6", "−"}, {"1", "2", "3", "+"}, {"0", "00", ".", "="}};
+        LinearLayout.LayoutParams ruleLp = lpMatch(dp(1)); ruleLp.setMargins(0, 0, 0, dp(4)); panel.addView(rule, ruleLp);
+        String[][] keys = {{"⌫", "CE", "C", "%"}, {"1/x", "x²", "√x", "÷"}, {"7", "8", "9", "×"}, {"4", "5", "6", "−"}, {"1", "2", "3", "+"}, {"±", "0", ".", "="}};
         LinearLayout keypad = vertical(Color.TRANSPARENT);
         for (String[] rowKeys : keys) {
             LinearLayout row = horizontal(Color.TRANSPARENT);
@@ -1395,6 +1400,104 @@ public final class MainActivity extends Activity {
         }
         panel.addView(keypad, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
         return panel;
+    }
+
+    private View calculatorModeSwitch() {
+        LinearLayout switcher = horizontal(Color.rgb(244, 246, 248));
+        switcher.setPadding(dp(2), dp(2), dp(2), dp(2));
+        switcher.setBackground(roundStroke(Color.rgb(244, 246, 248), BORDER, 11));
+        switcher.addView(calculatorModeButton("普通", !calculatorProgrammerMode), new LinearLayout.LayoutParams(0, dp(32), 1));
+        switcher.addView(calculatorModeButton("程序员", calculatorProgrammerMode), new LinearLayout.LayoutParams(0, dp(32), 1));
+        return switcher;
+    }
+
+    private Button calculatorModeButton(String label, boolean active) {
+        Button button = new Button(this);
+        button.setAllCaps(false); button.setText(label); button.setTextSize(14);
+        button.setTextColor(active ? BLUE : TEXT); button.setTypeface(Typeface.DEFAULT, active ? Typeface.BOLD : Typeface.NORMAL);
+        button.setMinWidth(0); button.setMinHeight(0); button.setPadding(0, 0, 0, 0);
+        button.setBackground(roundStroke(active ? Color.WHITE : Color.TRANSPARENT, active ? BORDER : Color.TRANSPARENT, 9));
+        button.setOnClickListener(v -> {
+            boolean next = "程序员".equals(label);
+            if (calculatorProgrammerMode != next) { calculatorProgrammerMode = next; showTools(); }
+        });
+        return button;
+    }
+
+    private View buildProgrammerCalculator(LinearLayout panel) {
+        programmerRadixValues.clear();
+        calculatorDisplay = text(programmerCalculator.display(), 29, TEXT, false);
+        calculatorDisplay.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+        calculatorDisplay.setGravity(Gravity.CENTER_VERTICAL | Gravity.END); calculatorDisplay.setSingleLine(true);
+        panel.addView(calculatorDisplay, lpMatch(dp(45)));
+
+        LinearLayout bases = vertical(Color.TRANSPARENT);
+        bases.addView(programmerRadixRow("HEX", 16, programmerCalculator.hex()), lpMatch(dp(23)));
+        bases.addView(programmerRadixRow("DEC", 10, programmerCalculator.dec()), lpMatch(dp(23)));
+        bases.addView(programmerRadixRow("OCT", 8, programmerCalculator.oct()), lpMatch(dp(23)));
+        bases.addView(programmerRadixRow("BIN", 2, programmerCalculator.bin()), lpMatch(dp(23)));
+        panel.addView(bases, lpMatch(dp(92)));
+
+        int bits = programmerCalculator.wordBits();
+        String widthName = bits == 64 ? "QWORD" : bits == 32 ? "DWORD" : bits == 16 ? "WORD" : "BYTE";
+        Button width = compactCalculatorButton(widthName + "  ·  " + bits + " 位", false);
+        width.setGravity(Gravity.START | Gravity.CENTER_VERTICAL); width.setPadding(dp(10), 0, dp(8), 0);
+        width.setOnClickListener(v -> { programmerCalculator.cycleWordSize(); showTools(); });
+        LinearLayout.LayoutParams widthLp = lpMatch(dp(34)); widthLp.setMargins(0, dp(2), 0, dp(3)); panel.addView(width, widthLp);
+
+        String[][] keys = {{"A", "AND", "OR", "XOR", "NOT", "⌫"}, {"B", "7", "8", "9", "÷", "Mod"},
+                {"HEX_C", "4", "5", "6", "×", "CE"}, {"D", "1", "2", "3", "−", "+"},
+                {"E", "F", "0", "<<", ">>", "="}};
+        LinearLayout keypad = vertical(Color.TRANSPARENT);
+        for (String[] rowKeys : keys) {
+            LinearLayout row = horizontal(Color.TRANSPARENT);
+            for (String key : rowKeys) {
+                String label = "HEX_C".equals(key) ? "C" : key;
+                Button button = compactCalculatorButton(label, "=".equals(key));
+                int digit = "HEX_C".equals(key) ? 12 : key.length() == 1 ? Character.digit(key.charAt(0), 16) : -1;
+                boolean enabled = digit < 0 || digit < programmerCalculator.radix();
+                button.setEnabled(enabled); button.setAlpha(enabled ? 1f : .28f);
+                button.setOnClickListener(v -> { programmerCalculator.press(key); updateProgrammerCalculator(); });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1);
+                lp.setMargins(dp(2), dp(2), dp(2), dp(2)); row.addView(button, lp);
+            }
+            keypad.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        }
+        panel.addView(keypad, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        return panel;
+    }
+
+    private View programmerRadixRow(String label, int radix, String value) {
+        LinearLayout row = horizontal(Color.TRANSPARENT); row.setGravity(Gravity.CENTER_VERTICAL);
+        TextView name = text(label, 12, programmerCalculator.radix() == radix ? BLUE : MUTED, true);
+        row.addView(name, new LinearLayout.LayoutParams(dp(42), ViewGroup.LayoutParams.MATCH_PARENT));
+        TextView content = text(value, 12, programmerCalculator.radix() == radix ? TEXT : MUTED, false);
+        content.setGravity(Gravity.CENTER_VERTICAL | Gravity.END); content.setSingleLine(true);
+        row.addView(content, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
+        programmerRadixValues.put(radix, content);
+        row.setBackground(roundStroke(programmerCalculator.radix() == radix ? Color.rgb(237, 249, 247) : Color.TRANSPARENT,
+                Color.TRANSPARENT, 7));
+        row.setOnClickListener(v -> { programmerCalculator.setRadix(radix); showTools(); });
+        return row;
+    }
+
+    private Button compactCalculatorButton(String key, boolean primary) {
+        Button button = new Button(this);
+        button.setAllCaps(false); button.setText(key); button.setTextSize(key.length() > 2 ? 11 : 16);
+        button.setTextColor(primary ? Color.WHITE : TEXT); button.setTypeface(Typeface.DEFAULT, Typeface.NORMAL);
+        button.setMinWidth(0); button.setMinHeight(0); button.setPadding(0, 0, 0, 0);
+        button.setBackground(roundStroke(primary ? BLUE : Color.WHITE, primary ? BLUE : BORDER, 9));
+        return button;
+    }
+
+    private void updateProgrammerCalculator() {
+        if (calculatorDisplay != null) calculatorDisplay.setText(programmerCalculator.display());
+        TextView hex = programmerRadixValues.get(16), dec = programmerRadixValues.get(10);
+        TextView oct = programmerRadixValues.get(8), bin = programmerRadixValues.get(2);
+        if (hex != null) hex.setText(programmerCalculator.hex());
+        if (dec != null) dec.setText(programmerCalculator.dec());
+        if (oct != null) oct.setText(programmerCalculator.oct());
+        if (bin != null) bin.setText(programmerCalculator.bin());
     }
 
     private Button calculatorKey(String key) {
@@ -1446,6 +1549,20 @@ public final class MainActivity extends Activity {
             if (!calculatorInput.contains(".")) calculatorInput += ".";
         } else if ("C".equals(key)) {
             calculatorInput = "0"; calculatorAccumulator = 0; calculatorOperator = ""; calculatorHistory = ""; calculatorReplaceInput = false;
+        } else if ("CE".equals(key)) {
+            calculatorInput = "0"; calculatorReplaceInput = true;
+        } else if ("⌫".equals(key)) {
+            if (calculatorReplaceInput || "错误".equals(calculatorInput) || calculatorInput.length() <= 1) calculatorInput = "0";
+            else calculatorInput = calculatorInput.substring(0, calculatorInput.length() - 1);
+        } else if ("1/x".equals(key) || "x²".equals(key) || "√x".equals(key)) {
+            try {
+                double value = Double.parseDouble(calculatorInput);
+                if ("1/x".equals(key)) { if (value == 0) throw new ArithmeticException(); value = 1d / value; }
+                else if ("x²".equals(key)) value *= value;
+                else { if (value < 0) throw new ArithmeticException(); value = Math.sqrt(value); }
+                calculatorHistory = key + "(" + calculatorInput + ")";
+                calculatorInput = calculatorNumber(value); calculatorReplaceInput = true;
+            } catch (Exception ignored) { calculatorInput = "错误"; calculatorReplaceInput = true; }
         } else if ("±".equals(key)) {
             if (!"0".equals(calculatorInput) && !"错误".equals(calculatorInput)) calculatorInput = calculatorInput.startsWith("-") ? calculatorInput.substring(1) : "-" + calculatorInput;
         } else if ("%".equals(key)) {
