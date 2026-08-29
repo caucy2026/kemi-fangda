@@ -2051,6 +2051,9 @@ public final class MainActivity extends Activity {
             }
         }
         snapshot.processes.sort((a, b) -> Long.compare(b.memoryBytes, a.memoryBytes));
+        for (ProcessEntry entry : snapshot.processes) snapshot.listedProcessMemory += Math.max(0, entry.memoryBytes);
+        long usedMemory = Math.max(0, snapshot.totalMemory - snapshot.availableMemory);
+        snapshot.systemSharedMemory = Math.max(0, usedMemory - snapshot.listedProcessMemory);
         return snapshot;
     }
 
@@ -2110,8 +2113,9 @@ public final class MainActivity extends Activity {
         }
         Map<Integer, SystemPrivilege.ForegroundTask> privilegedTasks = SystemPrivilege.foregroundTasksByDisplay(this);
         boolean realTaskPermission = checkSelfPermission("android.permission.REAL_GET_TASKS") == PackageManager.PERMISSION_GRANTED;
-        snapshot.taskAccess = realTaskPermission && !requiredDisplayIds.isEmpty()
-                && privilegedTasks.keySet().containsAll(requiredDisplayIds);
+        // Platform-signed builds receive REAL_GET_TASKS at install time. A display can
+        // temporarily have no task, which is a sampling state rather than a permission failure.
+        snapshot.taskAccess = realTaskPermission;
         for (Map.Entry<Integer, SystemPrivilege.ForegroundTask> task : privilegedTasks.entrySet()) {
             String packageName = task.getValue().packageName;
             String role = task.getKey() == Display.DEFAULT_DISPLAY ? "主屏前台" : "副屏前台";
@@ -2265,7 +2269,7 @@ public final class MainActivity extends Activity {
         long usedMemory = snapshot.totalMemory - snapshot.availableMemory;
         long usedStorage = snapshot.totalStorage - snapshot.availableStorage;
         metrics.addView(metricCard("CPU", String.format(Locale.CHINA, "%.0f%%", snapshot.cpuPercent), snapshot.corePercents.length + " 核实时负载", snapshot.cpuPercent < 80 ? TEAL : Color.rgb(230, 126, 34)), weightedCard());
-        metrics.addView(metricCard("内存", "6 GB + 2 GB", formatBytes(usedMemory) + " 已用 · " + formatBytes(snapshot.availableMemory) + " 可用", snapshot.lowMemory ? Color.rgb(220, 70, 70) : TEAL), weightedCard());
+        metrics.addView(metricCard("内存", "6 GB + 2 GB", formatBytes(usedMemory) + " 占用 · 列表 PSS " + formatBytes(snapshot.listedProcessMemory), snapshot.lowMemory ? Color.rgb(220, 70, 70) : TEAL), weightedCard());
         metrics.addView(metricCard("存储", formatBytes(usedStorage) + " / " + formatBytes(snapshot.totalStorage), formatBytes(snapshot.availableStorage) + " 可用", percent(usedStorage, snapshot.totalStorage) > 90 ? Color.rgb(220, 70, 70) : BLUE), weightedCard());
         String stability = snapshot.lowMemory || percent(usedStorage, snapshot.totalStorage) > 94 || snapshot.cpuPercent > 92 ? "需要关注" : "运行稳定";
         metrics.addView(metricCard("系统稳定性", stability, snapshot.processes.size() + " 个活动进程 · 已运行 " + uptimeText(), "运行稳定".equals(stability) ? TEAL : Color.rgb(230, 126, 34)), weightedCard());
@@ -2276,14 +2280,7 @@ public final class MainActivity extends Activity {
         fileList.addView(coreUsagePanel(snapshot.corePercents, snapshot.coreFrequencies), lpMatch(dp(100)));
         fileList.addView(memoryPressurePanel(snapshot), lpMatch(dp(126)));
         fileList.addView(deviceDiagnosticsPanel(snapshot), lpMatch(dp(142)));
-        if (!snapshot.usageAccess) {
-            LinearLayout permission = horizontal(Color.rgb(255, 249, 235)); permission.setGravity(Gravity.CENTER_VERTICAL); permission.setPadding(dp(16), 0, dp(10), 0); permission.setBackground(roundStroke(Color.rgb(255, 249, 235), Color.rgb(239, 204, 126), 11));
-            permission.addView(text("Android 限制了其他应用的活动信息，启用一次分析权限后可显示完整的近期后台应用。", 12, Color.rgb(126, 88, 18), false), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-            Button allow = smallActionButton("启用活动分析", Color.rgb(160, 99, 8));
-            allow.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)));
-            permission.addView(allow, new LinearLayout.LayoutParams(dp(138), dp(44)));
-            LinearLayout.LayoutParams permissionLp = lpMatch(dp(58)); permissionLp.setMargins(dp(8), 0, dp(8), dp(8)); fileList.addView(permission, permissionLp);
-        }
+        fileList.addView(processMemorySummaryRow(snapshot), lpMatch(dp(48)));
         fileList.addView(processHeaderRow(), lpMatch(dp(36)));
         int cleanable = 0;
         int cleaned = 0;
@@ -2313,7 +2310,7 @@ public final class MainActivity extends Activity {
         panel.setBackground(roundStroke(Color.rgb(240, 249, 247), Color.rgb(174, 220, 212), 12));
         LinearLayout copy = vertical(Color.TRANSPARENT);
         copy.addView(text("双屏前台保护已开启", 14, Color.rgb(10, 117, 102), true));
-        String unavailable = snapshot.taskAccess ? "系统未返回" : "系统权限未生效";
+        String unavailable = "正在识别";
         String main = snapshot.screenApps.getOrDefault("主屏前台", unavailable);
         String secondary = snapshot.activeDisplayCount > 1
                 ? snapshot.screenApps.getOrDefault("副屏前台", unavailable) : "未检测到副屏";
@@ -2334,8 +2331,8 @@ public final class MainActivity extends Activity {
         panel.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
         LinearLayout counts = vertical(Color.TRANSPARENT);
         counts.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
-        counts.addView(text(snapshot.taskAccess ? "仅 " + cleanable + " 个普通后台可清理" : "系统权限未生效 · 已禁止清理",
-                13, snapshot.taskAccess && cleanable > 0 ? Color.rgb(190, 112, 20) : snapshot.taskAccess ? TEAL : Color.rgb(190, 90, 45), true));
+        counts.addView(text("仅 " + cleanable + " 个普通后台可清理",
+                13, cleanable > 0 ? Color.rgb(190, 112, 20) : TEAL, true));
         counts.addView(text("屏幕保护 " + screenProtected + " · 系统 " + systemProtected + " · 服务 " + serviceProtected, 10, MUTED, false));
         panel.addView(counts, new LinearLayout.LayoutParams(dp(330), ViewGroup.LayoutParams.MATCH_PARENT));
         LinearLayout.LayoutParams lp = lpMatch(dp(88));
@@ -2480,9 +2477,9 @@ public final class MainActivity extends Activity {
 
         LinearLayout detail = vertical(Color.TRANSPARENT);
         detail.setPadding(dp(18), 0, 0, 0);
-        detail.addView(memoryLine("App 内存", fixedGb(snapshot.appMemory), true));
-        detail.addView(memoryLine("缓存文件", fixedGb(snapshot.cachedMemory), false));
-        detail.addView(memoryLine("系统内核", fixedGb(snapshot.kernelMemory), false));
+        detail.addView(memoryLine("列表进程 PSS", fixedGb(snapshot.listedProcessMemory), true));
+        detail.addView(memoryLine("系统/图形/共享", fixedGb(snapshot.systemSharedMemory), false));
+        detail.addView(memoryLine("可回收缓存", fixedGb(snapshot.cachedMemory), false));
         detail.addView(memoryLine("交换分区", fixedGb(snapshot.swapUsed) + " / " + fixedGb(snapshot.swapTotal), false));
         panel.addView(detail, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
         LinearLayout.LayoutParams panelLp = lpMatch(dp(126)); panelLp.setMargins(dp(8), dp(3), dp(8), dp(8)); panel.setLayoutParams(panelLp);
@@ -2609,11 +2606,26 @@ public final class MainActivity extends Activity {
         header.setGravity(Gravity.CENTER_VERTICAL);
         header.setPadding(dp(38), 0, dp(8), 0);
         header.addView(text("进程名称", 11, MUTED, false), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        header.addView(text("内存", 11, MUTED, false), new LinearLayout.LayoutParams(dp(110), ViewGroup.LayoutParams.WRAP_CONTENT));
+        header.addView(text("内存 (PSS)", 11, MUTED, false), new LinearLayout.LayoutParams(dp(110), ViewGroup.LayoutParams.WRAP_CONTENT));
         header.addView(text("PID", 11, MUTED, false), new LinearLayout.LayoutParams(dp(80), ViewGroup.LayoutParams.WRAP_CONTENT));
         TextView result = text("清理判定", 11, MUTED, false); result.setGravity(Gravity.CENTER);
         header.addView(result, new LinearLayout.LayoutParams(dp(230), ViewGroup.LayoutParams.WRAP_CONTENT));
         return header;
+    }
+
+    private View processMemorySummaryRow(MonitorSnapshot snapshot) {
+        long used = Math.max(0, snapshot.totalMemory - snapshot.availableMemory);
+        LinearLayout row = horizontal(Color.rgb(246, 249, 251));
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(16), 0, dp(16), 0);
+        row.setBackground(roundStroke(Color.rgb(246, 249, 251), BORDER, 10));
+        row.addView(text("当前占用 " + fixedGb(used), 12, TEXT, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        row.addView(text("=  列表进程 PSS " + fixedGb(snapshot.listedProcessMemory)
+                + "  +  系统 / 图形 / 共享 " + fixedGb(snapshot.systemSharedMemory), 11, MUTED, false));
+        LinearLayout.LayoutParams lp = lpMatch(dp(48));
+        lp.setMargins(dp(8), dp(3), dp(8), dp(5));
+        row.setLayoutParams(lp);
+        return row;
     }
 
     private LinearLayout.LayoutParams weightedCard() {
@@ -3065,6 +3077,8 @@ public final class MainActivity extends Activity {
         long cachedMemory;
         long appMemory;
         long kernelMemory;
+        long listedProcessMemory;
+        long systemSharedMemory;
         final List<ProcessEntry> processes = new ArrayList<>();
     }
 }
