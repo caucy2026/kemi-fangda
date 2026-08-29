@@ -8,7 +8,12 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageInstaller;
+import android.content.pm.ApplicationInfo;
+import android.app.usage.StorageStats;
+import android.app.usage.StorageStatsManager;
 import android.os.Debug;
+import android.os.UserHandle;
+import android.os.storage.StorageManager;
 import android.view.Display;
 
 import java.io.BufferedReader;
@@ -191,6 +196,47 @@ final class SystemPrivilege {
         } catch (Exception ignored) {
             return false;
         }
+    }
+
+    static long applicationCacheBytes(Context context, ApplicationInfo info) {
+        if (info == null || !safePackage(info.packageName)) return 0;
+        try {
+            StorageStatsManager manager = context.getSystemService(StorageStatsManager.class);
+            if (manager == null) return 0;
+            StorageStats stats = manager.queryStatsForPackage(
+                    info.storageUuid == null ? StorageManager.UUID_DEFAULT : info.storageUuid,
+                    info.packageName, UserHandle.getUserHandleForUid(info.uid));
+            return Math.max(0, stats.getCacheBytes());
+        } catch (Exception ignored) {
+            return 0;
+        }
+    }
+
+    /** Requests Android's package manager to trim every cache it is allowed to reclaim. */
+    static boolean trimAllApplicationCaches(Context context) {
+        try {
+            Process process = new ProcessBuilder("/system/bin/cmd", "package", "trim-caches", "9223372036854775807")
+                    .redirectErrorStream(true).start();
+            if (process.waitFor(20, TimeUnit.SECONDS) && process.exitValue() == 0) return true;
+            process.destroy();
+        } catch (Exception ignored) { }
+        PackageManager manager = context.getPackageManager();
+        for (java.lang.reflect.Method method : manager.getClass().getMethods()) {
+            if (!"freeStorageAndNotify".equals(method.getName())) continue;
+            try {
+                Class<?>[] types = method.getParameterTypes();
+                Object[] args = new Object[types.length];
+                for (int i = 0; i < types.length; i++) {
+                    if (types[i] == long.class || types[i] == Long.class) args[i] = Long.MAX_VALUE;
+                    else if (types[i] == int.class || types[i] == Integer.class) args[i] = 0;
+                    else args[i] = null;
+                }
+                method.setAccessible(true);
+                method.invoke(manager, args);
+                return true;
+            } catch (Exception ignored) { }
+        }
+        return false;
     }
 
     static boolean uninstallUserPackage(Context context, String packageName) {

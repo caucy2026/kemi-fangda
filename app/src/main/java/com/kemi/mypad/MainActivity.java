@@ -165,6 +165,7 @@ public final class MainActivity extends Activity {
     private boolean calculatorProgrammerMode;
     private final ProgrammerCalculator programmerCalculator = new ProgrammerCalculator();
     private final Map<Integer, TextView> programmerRadixValues = new HashMap<>();
+    private CleanResult lastCleanResult;
     private final Runnable stopwatchTicker = new Runnable() {
         @Override public void run() {
             if (!stopwatchRunning || stopwatchDisplay == null) return;
@@ -2011,6 +2012,7 @@ public final class MainActivity extends Activity {
         snapshot.availableMemory = memory.availMem;
         snapshot.lowMemory = memory.lowMemory;
         readMemoryDetails(snapshot);
+        snapshot.applicationCacheBytes = installedApplicationCacheBytes(null);
         readDeviceDetails(snapshot);
         float[] cpu = readCpuUsage();
         snapshot.cpuPercent = cpu.length > 0 ? cpu[0] : 0;
@@ -2277,6 +2279,7 @@ public final class MainActivity extends Activity {
         metricsLp.setMargins(0, dp(6), 0, dp(4));
         fileList.addView(metrics, metricsLp);
         fileList.addView(screenProtectionPanel(snapshot), lpMatch(dp(88)));
+        if (lastCleanResult != null) fileList.addView(cleanResultPanel(lastCleanResult), lpMatch(dp(74)));
         fileList.addView(coreUsagePanel(snapshot.corePercents, snapshot.coreFrequencies), lpMatch(dp(100)));
         fileList.addView(memoryPressurePanel(snapshot), lpMatch(dp(126)));
         fileList.addView(deviceDiagnosticsPanel(snapshot), lpMatch(dp(142)));
@@ -2479,7 +2482,7 @@ public final class MainActivity extends Activity {
         detail.setPadding(dp(18), 0, 0, 0);
         detail.addView(memoryLine("列表进程 PSS", fixedGb(snapshot.listedProcessMemory), true));
         detail.addView(memoryLine("系统/图形/共享", fixedGb(snapshot.systemSharedMemory), false));
-        detail.addView(memoryLine("可回收缓存", fixedGb(snapshot.cachedMemory), false));
+        detail.addView(memoryLine("应用缓存（可清理）", fixedGb(snapshot.applicationCacheBytes), false));
         detail.addView(memoryLine("交换分区", fixedGb(snapshot.swapUsed) + " / " + fixedGb(snapshot.swapTotal), false));
         panel.addView(detail, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
         LinearLayout.LayoutParams panelLp = lpMatch(dp(126)); panelLp.setMargins(dp(8), dp(3), dp(8), dp(8)); panel.setLayoutParams(panelLp);
@@ -2628,6 +2631,26 @@ public final class MainActivity extends Activity {
         return row;
     }
 
+    private View cleanResultPanel(CleanResult result) {
+        LinearLayout panel = horizontal(Color.rgb(238, 249, 246));
+        panel.setGravity(Gravity.CENTER_VERTICAL);
+        panel.setPadding(dp(16), dp(8), dp(16), dp(8));
+        panel.setBackground(roundStroke(Color.rgb(238, 249, 246), Color.rgb(165, 216, 206), 12));
+        LinearLayout copy = vertical(Color.TRANSPARENT);
+        copy.addView(text("本次清理完成", 13, Color.rgb(10, 117, 102), true));
+        copy.addView(text("后台进程 " + result.processCount + " 个 · 应用缓存 " + result.cachePackageCount
+                + " 个 · 系统缓存回收" + (result.systemTrimRequested ? "已执行" : "未获系统响应"), 10, MUTED, false));
+        panel.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
+        long totalReleased = result.processReleasedBytes + result.cacheReleasedBytes;
+        LinearLayout released = vertical(Color.TRANSPARENT); released.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
+        TextView total = text("实际释放 " + formatBytes(totalReleased), 15, TEAL, true); total.setGravity(Gravity.END); released.addView(total);
+        TextView parts = text("进程 " + formatBytes(result.processReleasedBytes) + " · 缓存 " + formatBytes(result.cacheReleasedBytes), 10, MUTED, false);
+        parts.setGravity(Gravity.END); released.addView(parts);
+        panel.addView(released, new LinearLayout.LayoutParams(dp(360), ViewGroup.LayoutParams.MATCH_PARENT));
+        LinearLayout.LayoutParams lp = lpMatch(dp(74)); lp.setMargins(dp(8), dp(3), dp(8), dp(8)); panel.setLayoutParams(lp);
+        return panel;
+    }
+
     private LinearLayout.LayoutParams weightedCard() {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1); lp.setMargins(dp(4), 0, dp(4), 0); return lp;
     }
@@ -2657,26 +2680,84 @@ public final class MainActivity extends Activity {
         primaryToolbarButton.setEnabled(false);
         showMonitorLoading("正在分析可安全清理的后台应用…");
         if (monitorProgress != null) ObjectAnimator.ofFloat(monitorProgress, View.ROTATION, 0f, 360f).setDuration(850).start();
-        handler.postDelayed(() -> { if (monitorStatus != null) monitorStatus.setText("正在释放后台占用…"); }, 550);
+        handler.postDelayed(() -> { if (monitorStatus != null) monitorStatus.setText("正在释放后台进程和应用缓存…"); }, 350);
         new Thread(() -> {
-            SystemClock.sleep(850);
+            MonitorSnapshot before = collectMonitorSnapshot();
+            CleanResult result = new CleanResult();
             ActivityManager manager = getSystemService(ActivityManager.class);
             if (manager != null) {
-                MonitorSnapshot analyzed = collectMonitorSnapshot();
                 Set<String> handled = new HashSet<>();
-                for (ProcessEntry entry : analyzed.processes) {
+                for (ProcessEntry entry : before.processes) {
                     if (!entry.cleanable) continue;
                     for (String pkg : entry.packages) if (handled.add(pkg)) {
                         manager.killBackgroundProcesses(pkg);
                         cleanedPackages.put(pkg, System.currentTimeMillis());
+                        result.processCount++;
                     }
                 }
             }
+            // Cache directories are disposable by Android contract. Keep foreground
+            // processes alive, but include their cache in a complete cache cleanup.
+            List<ApplicationInfo> cacheTargets = cacheTargets(Collections.emptySet());
+            long cacheBefore = installedApplicationCacheBytes(cacheTargets);
+            for (ApplicationInfo info : cacheTargets) {
+                long bytes = SystemPrivilege.applicationCacheBytes(this, info);
+                if (bytes > 0) {
+                    result.cachePackageCount++;
+                    SystemPrivilege.clearApplicationCache(this, info.packageName);
+                }
+            }
+            result.systemTrimRequested = SystemPrivilege.trimAllApplicationCaches(this);
+            long cacheAfter = waitForCacheCleanup(cacheTargets, cacheBefore);
+            MonitorSnapshot after = collectMonitorSnapshot();
+            // Package Manager deletion is asynchronous; the final monitor snapshot
+            // is authoritative and can observe a later completion than the poll loop.
+            cacheAfter = Math.min(cacheAfter, after.applicationCacheBytes);
+            result.cacheReleasedBytes = Math.max(0, cacheBefore - cacheAfter);
+            result.processReleasedBytes = Math.max(0, before.listedProcessMemory - after.listedProcessMemory);
+            lastCleanResult = result;
             runOnUiThread(() -> {
                 primaryToolbarButton.setEnabled(true);
                 showActivityMonitor();
             });
         }, "mypad-cleaner").start();
+    }
+
+    private long waitForCacheCleanup(List<ApplicationInfo> targets, long beforeBytes) {
+        long deadline = SystemClock.elapsedRealtime() + 8000;
+        long previous = beforeBytes;
+        int stableSamples = 0;
+        while (SystemClock.elapsedRealtime() < deadline) {
+            SystemClock.sleep(500);
+            long current = installedApplicationCacheBytes(targets);
+            if (current <= 0) return 0;
+            if (current == previous) stableSamples++; else stableSamples = 0;
+            previous = current;
+            if (stableSamples >= 3 && current < beforeBytes) return current;
+        }
+        return previous;
+    }
+
+    private List<ApplicationInfo> cacheTargets(Set<String> protectedPackages) {
+        List<ApplicationInfo> result = new ArrayList<>();
+        try {
+            for (ApplicationInfo info : getPackageManager().getInstalledApplications(PackageManager.MATCH_DISABLED_COMPONENTS)) {
+                if (info == null || protectedPackages.contains(info.packageName)) continue;
+                result.add(info);
+            }
+        } catch (Exception ignored) { }
+        return result;
+    }
+
+    private long installedApplicationCacheBytes(List<ApplicationInfo> selected) {
+        List<ApplicationInfo> applications = selected;
+        if (applications == null) {
+            try { applications = getPackageManager().getInstalledApplications(PackageManager.MATCH_DISABLED_COMPONENTS); }
+            catch (Exception ignored) { applications = Collections.emptyList(); }
+        }
+        long total = 0;
+        for (ApplicationInfo info : applications) total += SystemPrivilege.applicationCacheBytes(this, info);
+        return Math.max(0, total);
     }
 
     private boolean isCleanable(ProcessEntry entry) {
@@ -3079,6 +3160,15 @@ public final class MainActivity extends Activity {
         long kernelMemory;
         long listedProcessMemory;
         long systemSharedMemory;
+        long applicationCacheBytes;
         final List<ProcessEntry> processes = new ArrayList<>();
+    }
+
+    private static final class CleanResult {
+        int processCount;
+        int cachePackageCount;
+        long processReleasedBytes;
+        long cacheReleasedBytes;
+        boolean systemTrimRequested;
     }
 }
