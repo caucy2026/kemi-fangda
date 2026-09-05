@@ -10,7 +10,7 @@ import android.graphics.drawable.Drawable;
 
 /** Consistent macOS-style outline icons for the file context menu. */
 final class MacActionIconDrawable extends Drawable {
-    enum Kind { COPY, CUT, DELETE, REFRESH, OPEN, CACHE }
+    enum Kind { SHARE, COPY, CUT, DELETE, REFRESH, OPEN, CACHE }
 
     private final Kind kind;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -28,6 +28,7 @@ final class MacActionIconDrawable extends Drawable {
         paint.setStrokeCap(Paint.Cap.ROUND);
         paint.setStrokeJoin(Paint.Join.ROUND);
         switch (kind) {
+            case SHARE: drawShare(canvas, w, h); break;
             case COPY: drawCopy(canvas, w, h); break;
             case CUT: drawCut(canvas, w, h); break;
             case DELETE: drawDelete(canvas, w, h); break;
@@ -36,6 +37,13 @@ final class MacActionIconDrawable extends Drawable {
             case CACHE: drawCache(canvas, w, h); break;
         }
         canvas.restore();
+    }
+
+    private void drawShare(Canvas c, float w, float h) {
+        c.drawRoundRect(new RectF(w * .18f, h * .38f, w * .82f, h * .88f), w * .08f, w * .08f, paint);
+        c.drawLine(w * .50f, h * .62f, w * .50f, h * .12f, paint);
+        c.drawLine(w * .50f, h * .12f, w * .32f, h * .31f, paint);
+        c.drawLine(w * .50f, h * .12f, w * .68f, h * .31f, paint);
     }
 
     private void drawCopy(Canvas c, float w, float h) {

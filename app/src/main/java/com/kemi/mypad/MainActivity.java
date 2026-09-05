@@ -85,6 +85,7 @@ import java.net.URLEncoder;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -138,7 +139,7 @@ public final class MainActivity extends Activity {
     private boolean storageCallbackRegistered;
     private boolean fileOperationReceiverRegistered;
     private File currentDirectory;
-    private File previousDirectory;
+    private final ArrayDeque<File> forwardDirectories = new ArrayDeque<>();
     private File navigationRoot;
     private String currentLanBase = "";
     private String currentLanPath = "";
@@ -237,7 +238,9 @@ public final class MainActivity extends Activity {
             usbReceiverRegistered = true;
         } catch (Exception ignored) { }
         try {
-            registerReceiver(fileOperationReceiver, new IntentFilter(DestinationPickerActivity.ACTION_COMPLETED));
+            IntentFilter completed = new IntentFilter(DestinationPickerActivity.ACTION_COMPLETED);
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(fileOperationReceiver, completed, Context.RECEIVER_NOT_EXPORTED);
+            else registerReceiver(fileOperationReceiver, completed);
             fileOperationReceiverRegistered = true;
         } catch (Exception ignored) { }
         StorageManager storage = getSystemService(StorageManager.class);
@@ -555,11 +558,15 @@ public final class MainActivity extends Activity {
     }
 
     private void showDirectory(File directory, String label) {
+        showDirectory(directory, label, true);
+    }
+
+    private void showDirectory(File directory, String label, boolean clearForwardHistory) {
         if (directory == null) {
             message("未找到该位置");
             return;
         }
-        previousDirectory = currentDirectory;
+        if (clearForwardHistory) forwardDirectories.clear();
         currentDirectory = directory;
         setActiveSection(label);
         useFileToolbar();
@@ -780,7 +787,8 @@ public final class MainActivity extends Activity {
             String parent = new File(currentLanPath).getParent();
             loadLanPath(currentLanBase, parent == null ? "" : parent);
         } else if (canNavigateToParent()) {
-            showDirectory(currentDirectory.getParentFile(), currentSection);
+            forwardDirectories.push(currentDirectory);
+            showDirectory(currentDirectory.getParentFile(), currentSection, false);
         }
     }
 
@@ -823,10 +831,13 @@ public final class MainActivity extends Activity {
         backButton.setEnabled(canNavigateToParent()
                 || ("局域网文件".equals(currentSection) && !currentLanPath.isEmpty()));
         backButton.setAlpha(backButton.isEnabled() ? 1f : 0.36f);
-        forwardButton.setEnabled(previousDirectory != null && previousDirectory.exists());
+        while (!forwardDirectories.isEmpty() && !forwardDirectories.peek().exists()) {
+            forwardDirectories.pop();
+        }
+        forwardButton.setEnabled(currentDirectory != null && !forwardDirectories.isEmpty());
         forwardButton.setOnClickListener(v -> {
-            File target = previousDirectory;
-            if (target != null) showDirectory(target, currentSection);
+            File target = forwardDirectories.poll();
+            if (target != null) showDirectory(target, currentSection, false);
         });
     }
 
@@ -852,12 +863,36 @@ public final class MainActivity extends Activity {
         startActivity(Intent.createChooser(send, "分享“" + file.getName() + "”"));
     }
 
+    private void shareFolder(File directory) {
+        footerRight.setText("正在打包“" + directory.getName() + "”…");
+        new Thread(() -> {
+            try {
+                File externalCache = getExternalCacheDir();
+                if (externalCache == null) throw new java.io.IOException("共享存储不可用");
+                File shareRoot = new File(externalCache, "shares");
+                if (!shareRoot.exists() && !shareRoot.mkdirs()) throw new java.io.IOException("无法创建分享目录");
+                File archive = new File(shareRoot, FolderArchive.safeArchiveName(directory.getName()));
+                FolderArchive.zip(directory, archive);
+                runOnUiThread(() -> {
+                    footerRight.setText("已准备分享 · " + formatBytes(archive.length()));
+                    shareFile(archive);
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> footerRight.setText("文件夹分享失败，请确认存储设备仍已连接"));
+            }
+        }, "kemi-folder-share").start();
+    }
+
     private void showFileOperations(View anchor, File file) {
         LinearLayout panel = vertical(Color.TRANSPARENT);
         panel.setPadding(dp(6), dp(6), dp(6), dp(6));
         int menuWidth = dp(205);
-        int menuHeight = dp(190);
+        int menuHeight = dp(238);
         PopupWindow popup = new PopupWindow(panel, menuWidth, menuHeight, true);
+        panel.addView(macMenuRow(MacActionIconDrawable.Kind.SHARE, "分享", true, () -> {
+            popup.dismiss();
+            if (file.isDirectory()) shareFolder(file); else shareFile(file);
+        }), lpMatch(dp(42)));
         panel.addView(macMenuRow(MacActionIconDrawable.Kind.COPY, "复制到…", true, () -> {
             popup.dismiss(); launchDestinationPicker(Collections.singletonList(file), false);
         }), lpMatch(dp(42)));
@@ -1293,9 +1328,33 @@ public final class MainActivity extends Activity {
     private void clearAppCache(ApplicationInfo app, String label) {
         footerRight.setText("正在清理“" + label + "”缓存…");
         new Thread(() -> {
-            boolean ok = SystemPrivilege.clearApplicationCache(this, app.packageName);
-            runOnUiThread(() -> footerRight.setText(ok ? "“" + label + "”缓存已清理" : "缓存清理失败，请检查系统权限"));
+            long before = SystemPrivilege.applicationCacheBytes(this, app);
+            if (before <= 0) {
+                runOnUiThread(() -> footerRight.setText("“" + label + "”当前没有可清理缓存"));
+                return;
+            }
+            SystemPrivilege.clearApplicationCache(this, app.packageName);
+            long after = waitForApplicationCacheCleanup(app, before);
+            long released = Math.max(0, before - after);
+            runOnUiThread(() -> footerRight.setText(released > 0
+                    ? "“" + label + "”已清理 " + formatBytes(released)
+                    : "未释放该应用缓存，可使用清理后台的一键清理"));
         }, "kemi-clear-cache").start();
+    }
+
+    private long waitForApplicationCacheCleanup(ApplicationInfo app, long beforeBytes) {
+        long deadline = SystemClock.elapsedRealtime() + 4500;
+        long previous = beforeBytes;
+        int stableSamples = 0;
+        while (SystemClock.elapsedRealtime() < deadline) {
+            SystemClock.sleep(400);
+            long current = SystemPrivilege.applicationCacheBytes(this, app);
+            if (current <= 0) return 0;
+            if (current == previous) stableSamples++; else stableSamples = 0;
+            previous = current;
+            if (stableSamples >= 3 && current < beforeBytes) return current;
+        }
+        return previous;
     }
 
     private void confirmUninstall(String packageName, String label) {
@@ -1567,7 +1626,16 @@ public final class MainActivity extends Activity {
         } else if ("±".equals(key)) {
             if (!"0".equals(calculatorInput) && !"错误".equals(calculatorInput)) calculatorInput = calculatorInput.startsWith("-") ? calculatorInput.substring(1) : "-" + calculatorInput;
         } else if ("%".equals(key)) {
-            try { calculatorInput = calculatorNumber(Double.parseDouble(calculatorInput) / 100d); } catch (Exception ignored) { calculatorInput = "错误"; }
+            try {
+                double percent = Double.parseDouble(calculatorInput) / 100d;
+                // Match the familiar Windows standard-calculator rule:
+                // 200 + 10% means 10% of 200, while 200 × 10% means 0.10.
+                if ("+".equals(calculatorOperator) || "-".equals(calculatorOperator)) {
+                    percent *= calculatorAccumulator;
+                }
+                calculatorInput = calculatorNumber(percent);
+                calculatorReplaceInput = false;
+            } catch (Exception ignored) { calculatorInput = "错误"; calculatorReplaceInput = true; }
         } else {
             String operator = "−".equals(key) ? "-" : key;
             String shownOperator = "-".equals(operator) ? "−" : operator;
@@ -2638,13 +2706,12 @@ public final class MainActivity extends Activity {
         panel.setBackground(roundStroke(Color.rgb(238, 249, 246), Color.rgb(165, 216, 206), 12));
         LinearLayout copy = vertical(Color.TRANSPARENT);
         copy.addView(text("本次清理完成", 13, Color.rgb(10, 117, 102), true));
-        copy.addView(text("后台进程 " + result.processCount + " 个 · 应用缓存 " + result.cachePackageCount
-                + " 个 · 系统缓存回收" + (result.systemTrimRequested ? "已执行" : "未获系统响应"), 10, MUTED, false));
+        copy.addView(text("后台进程 " + result.processCount + " 个 · 扫描 " + result.cachePackageCount
+                + " 个应用缓存 · 系统回收请求" + (result.systemTrimRequested ? "已完成" : "未响应"), 10, MUTED, false));
         panel.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
-        long totalReleased = result.processReleasedBytes + result.cacheReleasedBytes;
         LinearLayout released = vertical(Color.TRANSPARENT); released.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
-        TextView total = text("实际释放 " + formatBytes(totalReleased), 15, TEAL, true); total.setGravity(Gravity.END); released.addView(total);
-        TextView parts = text("进程 " + formatBytes(result.processReleasedBytes) + " · 缓存 " + formatBytes(result.cacheReleasedBytes), 10, MUTED, false);
+        TextView total = text("内存释放 " + formatBytes(result.processReleasedBytes), 15, TEAL, true); total.setGravity(Gravity.END); released.addView(total);
+        TextView parts = text("磁盘缓存删除 " + formatBytes(result.cacheReleasedBytes), 10, MUTED, false);
         parts.setGravity(Gravity.END); released.addView(parts);
         panel.addView(released, new LinearLayout.LayoutParams(dp(360), ViewGroup.LayoutParams.MATCH_PARENT));
         LinearLayout.LayoutParams lp = lpMatch(dp(74)); lp.setMargins(dp(8), dp(3), dp(8), dp(8)); panel.setLayoutParams(lp);
@@ -2943,7 +3010,7 @@ public final class MainActivity extends Activity {
         else if ("局域网文件".equals(currentSection)) showLanFiles();
         else if ("文件分发".equals(currentSection)) showFileDistribution();
         else if ("清理后台".equals(currentSection)) refreshActivityMonitor(true);
-        else if (currentDirectory != null) showDirectory(currentDirectory, currentSection);
+        else if (currentDirectory != null) showDirectory(currentDirectory, currentSection, false);
     }
 
     private String displayPath(File directory, String label) {

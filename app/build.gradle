@@ -45,7 +45,8 @@ android {
 
     lint {
         // KEMI Pads v1 targets the fixed Android 12 system image used by the dual-screen hardware.
-        disable "ExpiredTargetSdkVersion"
+        // Listing/managing all apps and the signed system-management channel are core product functions.
+        disable "ExpiredTargetSdkVersion", "ProtectedPermissions", "QueryAllPackagesPermission"
     }
 }
 
