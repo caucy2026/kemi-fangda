@@ -9,7 +9,7 @@ import android.graphics.drawable.Drawable;
 
 /** One coherent, touch-readable macOS-style icon family for the main resource sidebar. */
 final class SidebarIconDrawable extends Drawable {
-    enum Kind { RECENT, DOWNLOAD, FAVORITE, STORAGE, USB, NETWORK, SCREENS, APPS, TOOLS, SETTINGS, CLEAN, SEND, EXIT }
+    enum Kind { RECENT, DOWNLOAD, FAVORITE, STORAGE, USB, NETWORK, SCREENS, APPS, TOOLS, TRACE, SETTINGS, CLEAN, SEND, EXIT }
 
     private final Kind kind;
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -33,6 +33,7 @@ final class SidebarIconDrawable extends Drawable {
             case SCREENS: canvas.drawRect(w*.08f,h*.18f,w*.64f,h*.66f,paint); canvas.drawRect(w*.43f,h*.38f,w*.92f,h*.82f,paint); break;
             case APPS: for(int y=0;y<2;y++) for(int x=0;x<2;x++) canvas.drawRoundRect(new RectF(w*(.14f+x*.4f),h*(.14f+y*.4f),w*(.42f+x*.4f),h*(.42f+y*.4f)),w*.06f,w*.06f,paint); break;
             case TOOLS: canvas.drawLine(w*.2f,h*.8f,w*.78f,h*.22f,paint); canvas.drawCircle(w*.23f,h*.23f,w*.12f,paint); canvas.drawCircle(w*.77f,h*.77f,w*.12f,paint); break;
+            case TRACE: canvas.drawRoundRect(new RectF(w*.13f,h*.17f,w*.87f,h*.83f),w*.1f,w*.1f,paint); canvas.drawLine(w*.24f,h*.56f,w*.37f,h*.56f,paint); canvas.drawLine(w*.37f,h*.56f,w*.45f,h*.36f,paint); canvas.drawLine(w*.45f,h*.36f,w*.55f,h*.69f,paint); canvas.drawLine(w*.55f,h*.69f,w*.64f,h*.48f,paint); canvas.drawLine(w*.64f,h*.48f,w*.77f,h*.48f,paint); break;
             case SETTINGS: gear(canvas,w,h); break;
             case CLEAN: canvas.drawRoundRect(new RectF(w*.22f,h*.27f,w*.78f,h*.84f),w*.07f,w*.07f,paint); canvas.drawLine(w*.16f,h*.24f,w*.84f,h*.24f,paint); canvas.drawLine(w*.37f,h*.13f,w*.63f,h*.13f,paint); break;
             case SEND: path.reset(); path.moveTo(w*.1f,h*.45f); path.lineTo(w*.88f,h*.12f); path.lineTo(w*.65f,h*.88f); path.lineTo(w*.44f,h*.59f); path.close(); canvas.drawPath(path,paint); canvas.drawLine(w*.44f,h*.59f,w*.88f,h*.12f,paint); break;

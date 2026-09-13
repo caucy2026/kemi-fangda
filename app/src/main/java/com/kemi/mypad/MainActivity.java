@@ -63,6 +63,7 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.PopupWindow;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.webkit.MimeTypeMap;
@@ -114,6 +115,7 @@ public final class MainActivity extends Activity {
     private static final String LAST_SECONDARY_LAUNCH_TIME = "last_secondary_launch_time";
     private static final long INSTALLED_PHYSICAL_MEMORY = 6L * 1024 * 1024 * 1024;
     private static final long CONFIGURED_SWAP_MEMORY = 2L * 1024 * 1024 * 1024;
+    private static final long ACTIVITY_MONITOR_REFRESH_MS = 3000L;
 
     private LinearLayout fileList;
     private LinearLayout headerView;
@@ -131,6 +133,8 @@ public final class MainActivity extends Activity {
     private TextView monitorStatus;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Map<String, Long> cleanedPackages = new ConcurrentHashMap<>();
+    private final Map<Integer, ProcessCpuCounter> previousProcessCpuCounters = new HashMap<>();
+    private long previousAggregateCpuTicks = -1;
     private long monitorGeneration;
     private Boolean lastUsbAvailable;
     private String lastUsbPath = "";
@@ -211,6 +215,9 @@ public final class MainActivity extends Activity {
         setContentView(buildUi());
         ensureStorageAccess();
         showDownloads();
+        if (BehaviorRecordStore.isEnabled(this) && !BehaviorRecorderService.isRunning()) {
+            try { BehaviorRecorderService.start(this, "app_opened"); } catch (Exception ignored) { }
+        }
     }
 
     @Override
@@ -346,6 +353,7 @@ public final class MainActivity extends Activity {
         side.addView(sideButton("双屏管理", "▣", this::showDualScreenManager));
         side.addView(sideButton("全部应用", "▦", this::showInstalledApps));
         side.addView(sideButton("工具集", "⌘", this::showTools));
+        side.addView(sideButton("行为记录", "◉", this::showBehaviorRecorder));
         side.addView(sideButton("系统设置", "⚙", this::openSystemSettings));
         side.addView(sideButton("清理后台", "◌", this::showActivityMonitor));
         side.addView(sideButton("文件分发", "⌁", this::showFileDistribution));
@@ -457,6 +465,7 @@ public final class MainActivity extends Activity {
         if ("双屏管理".equals(label)) return SidebarIconDrawable.Kind.SCREENS;
         if ("全部应用".equals(label)) return SidebarIconDrawable.Kind.APPS;
         if ("工具集".equals(label)) return SidebarIconDrawable.Kind.TOOLS;
+        if ("行为记录".equals(label)) return SidebarIconDrawable.Kind.TRACE;
         if ("系统设置".equals(label)) return SidebarIconDrawable.Kind.SETTINGS;
         if ("清理后台".equals(label)) return SidebarIconDrawable.Kind.CLEAN;
         if ("文件分发".equals(label)) return SidebarIconDrawable.Kind.SEND;
@@ -1430,6 +1439,164 @@ public final class MainActivity extends Activity {
         if (stopwatchRunning) { handler.removeCallbacks(stopwatchTicker); handler.post(stopwatchTicker); }
     }
 
+    private void showBehaviorRecorder() {
+        setActiveSection("行为记录");
+        currentDirectory = null;
+        navigationRoot = null;
+        breadcrumbView.setText("系统原有功能  ›  行为记录");
+        boolean enabled = BehaviorRecordStore.isEnabled(this);
+        useSectionToolbar(enabled ? "标记问题" : null, () -> {
+            BehaviorRecordStore.append(this, "incident_marker", BehaviorRecordStore.json("source", "KEMI Pads"));
+            showBehaviorRecorder();
+        }, true);
+        headerView.setVisibility(View.GONE);
+        fileList.removeAllViews();
+
+        LinearLayout hero = horizontal(enabled ? Color.rgb(237, 249, 246) : Color.rgb(247, 249, 251));
+        hero.setGravity(Gravity.CENTER_VERTICAL);
+        hero.setPadding(dp(22), dp(14), dp(22), dp(14));
+        hero.setBackground(roundStroke(enabled ? Color.rgb(237, 249, 246) : Color.rgb(247, 249, 251),
+                enabled ? Color.rgb(165, 216, 206) : BORDER, 14));
+        LinearLayout heroCopy = vertical(Color.TRANSPARENT);
+        heroCopy.addView(text("问题复现记录", 18, TEXT, true));
+        heroCopy.addView(text(enabled ? "正在后台记录操作语义与系统现场" : "关闭时不采集任何新事件", 12,
+                enabled ? Color.rgb(10, 117, 102) : MUTED, false));
+        hero.addView(heroCopy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Switch toggle = new Switch(this);
+        toggle.setShowText(false);
+        toggle.setContentDescription(enabled ? "关闭行为记录" : "开启行为记录");
+        toggle.setChecked(enabled);
+        toggle.setOnCheckedChangeListener((button, checked) -> {
+            if (checked == BehaviorRecordStore.isEnabled(this)) return;
+            if (checked) confirmEnableBehaviorRecording(button);
+            else setBehaviorRecordingEnabled(false);
+        });
+        hero.addView(toggle, new LinearLayout.LayoutParams(dp(64), dp(44)));
+        LinearLayout.LayoutParams heroLp = lpMatch(dp(94)); heroLp.setMargins(dp(8), dp(6), dp(8), dp(8));
+        fileList.addView(hero, heroLp);
+
+        LinearLayout metrics = horizontal(Color.TRANSPARENT);
+        String semantic = !enabled ? "未运行" : BehaviorAccessibilityService.isConnected() ? "控件事件已接入" : "正在接入";
+        metrics.addView(metricCard("记录状态", enabled ? "运行中" : "已关闭", semantic, enabled ? TEAL : MUTED), weightedCard());
+        metrics.addView(metricCard("当前会话", BehaviorRecordStore.activeSessionName(this),
+                "已占用 " + formatBytes(BehaviorRecordStore.activeBytes(this)), BLUE), weightedCard());
+        metrics.addView(metricCard("容量上限", "约 80 MB", "单会话 8 MB · 最多 10 个会话，旧记录自动轮换", TEAL), weightedCard());
+        LinearLayout.LayoutParams metricsLp = lpMatch(dp(112)); metricsLp.setMargins(dp(4), 0, dp(4), dp(8));
+        fileList.addView(metrics, metricsLp);
+
+        LinearLayout policy = vertical(Color.WHITE);
+        policy.setPadding(dp(18), dp(12), dp(18), dp(12));
+        policy.setBackground(roundStroke(Color.WHITE, BORDER, 12));
+        policy.addView(text("记录什么", 14, TEXT, true));
+        policy.addView(diagnosticLine("双屏前台 App / Activity、应用切换、点击、长按、滚动、返回键和屏幕状态"));
+        policy.addView(diagnosticLine("每 10 秒记录一次 CPU、内存、电池、温度和双屏现场；崩溃 / ANR 记录退出原因和受限诊断栈"));
+        policy.addView(text("明确不记录", 14, TEXT, true));
+        policy.addView(diagnosticLine("输入文字、密码、剪贴板、录音、网络内容和连续屏幕画面；记录包默认只保存在本机"));
+        LinearLayout.LayoutParams policyLp = lpMatch(dp(126)); policyLp.setMargins(dp(8), 0, dp(8), dp(8));
+        fileList.addView(policy, policyLp);
+
+        LinearLayout actions = horizontal(Color.TRANSPARENT);
+        actions.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
+        Button export = smallActionButton("导出最新记录包", BLUE);
+        export.setEnabled(BehaviorRecordStore.activeBytes(this) > 0);
+        export.setAlpha(export.isEnabled() ? 1f : .4f);
+        export.setOnClickListener(v -> exportBehaviorRecords());
+        actions.addView(export, new LinearLayout.LayoutParams(dp(160), dp(42)));
+        LinearLayout.LayoutParams actionsLp = lpMatch(dp(50)); actionsLp.setMargins(dp(8), 0, dp(8), dp(4));
+        fileList.addView(actions, actionsLp);
+
+        fileList.addView(text("最近时间线", 15, TEXT, true), lpMatch(dp(34)));
+        int shown = 0;
+        boolean healthShown = false;
+        for (JSONObject event : BehaviorRecordStore.recentEvents(this, 80)) {
+            String type = event.optString("type");
+            if ("health_sample".equals(type) && healthShown) continue;
+            if ("health_sample".equals(type)) healthShown = true;
+            fileList.addView(behaviorTimelineRow(event), lpMatch(dp(52)));
+            if (++shown >= 18) break;
+        }
+        if (shown == 0) fileList.addView(centerText("开启记录后，操作和系统事件会按时间顺序出现在这里", 13, MUTED, false), lpMatch(dp(90)));
+        footerLeft.setText(enabled ? "记录中 · 开机自动恢复" : "行为记录已关闭");
+        footerRight.setText("记录包供项目部或大模型分析，不会自动执行重放操作");
+        updateNavigationButtons();
+    }
+
+    private void confirmEnableBehaviorRecording(android.widget.CompoundButton toggle) {
+        new AlertDialog.Builder(this)
+                .setTitle("开启行为记录？")
+                .setMessage("开启后将从后台持续记录应用切换、控件操作和系统运行状态，并在下次开机自动恢复。不会记录输入文字、密码、剪贴板或连续画面。")
+                .setNegativeButton("取消", (dialog, which) -> toggle.setChecked(false))
+                .setPositiveButton("开启", (dialog, which) -> setBehaviorRecordingEnabled(true))
+                .setOnCancelListener(dialog -> toggle.setChecked(false))
+                .show();
+    }
+
+    private void setBehaviorRecordingEnabled(boolean enabled) {
+        if (enabled) {
+            BehaviorRecordStore.setEnabled(this, true);
+            BehaviorRecordStore.beginSession(this, "user_enabled");
+            boolean semanticEnabled = BehaviorRecorderService.setAccessibilityEnabled(this, true);
+            try { BehaviorRecorderService.start(this, "user_enabled"); }
+            catch (Exception error) {
+                BehaviorRecordStore.setEnabled(this, false);
+                footerRight.setText("行为记录服务启动失败");
+                showBehaviorRecorder();
+                return;
+            }
+            footerRight.setText(semanticEnabled ? "行为记录已开启" : "系统记录已开启，控件语义服务未能自动接入");
+        } else {
+            BehaviorRecordStore.append(this, "recording_disabled", BehaviorRecordStore.json("source", "user"));
+            BehaviorRecordStore.setEnabled(this, false);
+            BehaviorRecorderService.setAccessibilityEnabled(this, false);
+            BehaviorRecorderService.stop(this);
+            footerRight.setText("行为记录已关闭，已有记录仍保留在本机");
+        }
+        showBehaviorRecorder();
+    }
+
+    private void exportBehaviorRecords() {
+        footerRight.setText("正在整理记录包并计算校验值…");
+        new Thread(() -> {
+            try {
+                File archive = BehaviorRecordStore.exportLatest(this);
+                runOnUiThread(() -> {
+                    footerRight.setText("记录包已生成 · " + formatBytes(archive.length()));
+                    shareFile(archive);
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> footerRight.setText("没有可导出的记录，或共享存储不可用"));
+            }
+        }, "kemi-behavior-export").start();
+    }
+
+    private View behaviorTimelineRow(JSONObject event) {
+        LinearLayout row = horizontal(Color.WHITE);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(14), 0, dp(14), 0);
+        row.setBackground(roundStroke(Color.WHITE, Color.rgb(235, 239, 242), 8));
+        String time = new SimpleDateFormat("HH:mm:ss", Locale.CHINA).format(new java.util.Date(event.optLong("wallTimeMs")));
+        TextView clock = text(time, 11, MUTED, false); clock.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(clock, new LinearLayout.LayoutParams(dp(82), ViewGroup.LayoutParams.MATCH_PARENT));
+        JSONObject detail = event.optJSONObject("detail");
+        if (detail == null) detail = new JSONObject();
+        String type = event.optString("type");
+        String title;
+        if ("display_foreground".equals(type)) title = "屏幕 " + detail.optInt("displayId") + " 切换到 " + detail.optString("package");
+        else if ("ui_action".equals(type)) title = detail.optString("package") + " · " + detail.optString("event");
+        else if ("usage_event".equals(type)) title = "应用状态 · " + detail.optString("package") + " / " + detail.optString("class");
+        else if ("health_sample".equals(type)) title = "系统采样 · CPU " + String.format(Locale.CHINA, "%.0f%%", detail.optDouble("cpuPercent"))
+                + " · 可用内存 " + formatBytes(detail.optLong("memoryAvailableBytes"));
+        else if ("system_failure".equals(type)) title = "系统异常 · " + detail.optString("tag");
+        else if ("process_exit".equals(type)) title = "进程退出 · " + detail.optString("package") + " · 原因 " + detail.optInt("reason");
+        else if ("incident_marker".equals(type)) title = "◆ 问题标记";
+        else if ("system_state".equals(type)) title = "系统状态 · " + detail.optString("action");
+        else title = type.replace('_', ' ');
+        row.addView(text(title, 12, "incident_marker".equals(type) || "system_failure".equals(type)
+                ? Color.rgb(205, 70, 62) : TEXT, "incident_marker".equals(type)),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        return row;
+    }
+
     private View buildCalculator() {
         LinearLayout panel = vertical(Color.WHITE);
         panel.setPadding(dp(16), dp(8), dp(16), dp(8));
@@ -2016,6 +2183,7 @@ public final class MainActivity extends Activity {
 
     private void showActivityMonitor() {
         setActiveSection("清理后台");
+        resetProcessCpuUsage();
         currentDirectory = null;
         breadcrumbView.setText("系统  ›  活动监控");
         useSectionToolbar("一键清理", this::cleanBackgroundAnimated, true);
@@ -2066,7 +2234,7 @@ public final class MainActivity extends Activity {
                 loadMonitorSnapshot(generation, false);
                 scheduleMonitorRefresh(generation);
             }
-        }, 3000);
+        }, ACTIVITY_MONITOR_REFRESH_MS);
     }
 
     private MonitorSnapshot collectMonitorSnapshot() {
@@ -2112,6 +2280,7 @@ public final class MainActivity extends Activity {
         snapshot.usageAccess = hasUsageAccess();
         if (snapshot.usageAccess) mergeRecentlyActiveApps(snapshot);
         ensureScreenProcessEntries(snapshot);
+        applyProcessCpuUsage(snapshot);
         if (!snapshot.taskAccess) {
             for (ProcessEntry entry : snapshot.processes) {
                 entry.cleanable = false;
@@ -2338,7 +2507,12 @@ public final class MainActivity extends Activity {
         metrics.setPadding(dp(4), dp(6), dp(4), dp(12));
         long usedMemory = snapshot.totalMemory - snapshot.availableMemory;
         long usedStorage = snapshot.totalStorage - snapshot.availableStorage;
-        metrics.addView(metricCard("CPU", String.format(Locale.CHINA, "%.0f%%", snapshot.cpuPercent), snapshot.corePercents.length + " 核实时负载", snapshot.cpuPercent < 80 ? TEAL : Color.rgb(230, 126, 34)), weightedCard());
+        String processCpuSummary = snapshot.measuredProcessCount > 0
+                ? String.format(Locale.CHINA, "进程合计 %.1f%% · 3 秒刷新", snapshot.listedProcessCpuPercent)
+                : "进程占用正在采样";
+        metrics.addView(metricCard("CPU", String.format(Locale.CHINA, "%.0f%%", snapshot.cpuPercent),
+                snapshot.corePercents.length + " 核实时负载 · " + processCpuSummary,
+                snapshot.cpuPercent < 80 ? TEAL : Color.rgb(230, 126, 34)), weightedCard());
         metrics.addView(metricCard("内存", "6 GB + 2 GB", formatBytes(usedMemory) + " 占用 · 列表 PSS " + formatBytes(snapshot.listedProcessMemory), snapshot.lowMemory ? Color.rgb(220, 70, 70) : TEAL), weightedCard());
         metrics.addView(metricCard("存储", formatBytes(usedStorage) + " / " + formatBytes(snapshot.totalStorage), formatBytes(snapshot.availableStorage) + " 可用", percent(usedStorage, snapshot.totalStorage) > 90 ? Color.rgb(220, 70, 70) : BLUE), weightedCard());
         String stability = snapshot.lowMemory || percent(usedStorage, snapshot.totalStorage) > 94 || snapshot.cpuPercent > 92 ? "需要关注" : "运行稳定";
@@ -2361,7 +2535,7 @@ public final class MainActivity extends Activity {
             fileList.addView(processRow(entry), lpMatch(dp(68)));
         }
         footerLeft.setText(snapshot.processes.size() + " 个活动进程 · " + cleanable + " 个可清理" + (cleaned > 0 ? " · " + cleaned + " 个已清理" : ""));
-        footerRight.setText("只释放普通后台缓存 · 主屏、副屏、服务和系统进程全部保留");
+        footerRight.setText("CPU 按进程统计 · 每 3 秒刷新 · 主屏、副屏、服务和系统进程全部保留");
     }
 
     private View screenProtectionPanel(MonitorSnapshot snapshot) {
@@ -2678,6 +2852,7 @@ public final class MainActivity extends Activity {
         header.setPadding(dp(38), 0, dp(8), 0);
         header.addView(text("进程名称", 11, MUTED, false), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         header.addView(text("内存 (PSS)", 11, MUTED, false), new LinearLayout.LayoutParams(dp(110), ViewGroup.LayoutParams.WRAP_CONTENT));
+        header.addView(text("CPU", 11, MUTED, false), new LinearLayout.LayoutParams(dp(76), ViewGroup.LayoutParams.WRAP_CONTENT));
         header.addView(text("PID", 11, MUTED, false), new LinearLayout.LayoutParams(dp(80), ViewGroup.LayoutParams.WRAP_CONTENT));
         TextView result = text("清理判定", 11, MUTED, false); result.setGravity(Gravity.CENTER);
         header.addView(result, new LinearLayout.LayoutParams(dp(230), ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -2729,6 +2904,10 @@ public final class MainActivity extends Activity {
         if (!entry.label.equals(entry.processName)) labels.addView(text(entry.processName, 9, MUTED, false));
         row.addView(labels, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
         row.addView(text(entry.memoryBytes > 0 ? formatBytes(entry.memoryBytes) : "系统未公开", 12, MUTED, false), new LinearLayout.LayoutParams(dp(110), ViewGroup.LayoutParams.WRAP_CONTENT));
+        String cpu = entry.cpuPercent < 0 ? (entry.pid > 0 ? "采样中" : "—")
+                : String.format(Locale.CHINA, "%.1f%%", entry.cpuPercent);
+        row.addView(text(cpu, 12, entry.cpuPercent >= 20 ? Color.rgb(220, 92, 55) : MUTED, entry.cpuPercent >= 20),
+                new LinearLayout.LayoutParams(dp(76), ViewGroup.LayoutParams.WRAP_CONTENT));
         row.addView(text(entry.pid > 0 ? String.valueOf(entry.pid) : "—", 12, MUTED, false), new LinearLayout.LayoutParams(dp(80), ViewGroup.LayoutParams.WRAP_CONTENT));
         LinearLayout analysis = vertical(Color.TRANSPARENT);
         analysis.setGravity(Gravity.CENTER);
@@ -2918,6 +3097,68 @@ public final class MainActivity extends Activity {
         return result;
     }
 
+    private synchronized void resetProcessCpuUsage() {
+        previousAggregateCpuTicks = -1;
+        previousProcessCpuCounters.clear();
+    }
+
+    /**
+     * Calculates each process as a share of the whole device CPU capacity. The
+     * values therefore add up to the CPU card instead of reporting 100% per core.
+     */
+    private synchronized void applyProcessCpuUsage(MonitorSnapshot snapshot) {
+        long aggregateTicks = readAggregateCpuTicks();
+        if (aggregateTicks < 0) return;
+        long aggregateDelta = previousAggregateCpuTicks < 0 ? -1 : aggregateTicks - previousAggregateCpuTicks;
+        Map<Integer, ProcessCpuCounter> current = new HashMap<>();
+        for (ProcessEntry entry : snapshot.processes) {
+            entry.cpuPercent = -1;
+            if (entry.pid <= 0) continue;
+            ProcessCpuCounter counter = readProcessCpuCounter(entry.pid);
+            if (counter == null) continue;
+            current.put(entry.pid, counter);
+            ProcessCpuCounter previous = previousProcessCpuCounters.get(entry.pid);
+            if (previous == null || previous.startTimeTicks != counter.startTimeTicks) continue;
+            double percent = ProcessCpuUsage.percent(counter.cpuTicks - previous.cpuTicks, aggregateDelta);
+            if (percent >= 0) {
+                entry.cpuPercent = percent;
+                snapshot.listedProcessCpuPercent += percent;
+                snapshot.measuredProcessCount++;
+            }
+        }
+        previousAggregateCpuTicks = aggregateTicks;
+        previousProcessCpuCounters.clear();
+        previousProcessCpuCounters.putAll(current);
+    }
+
+    private long readAggregateCpuTicks() {
+        try (BufferedReader reader = new BufferedReader(new FileReader("/proc/stat"))) {
+            String line = reader.readLine();
+            if (line == null || !line.startsWith("cpu ")) return -1;
+            String[] fields = line.trim().split("\\s+");
+            long total = 0;
+            for (int i = 1; i < fields.length; i++) total += Long.parseLong(fields[i]);
+            return total;
+        } catch (Exception ignored) {
+            return -1;
+        }
+    }
+
+    private ProcessCpuCounter readProcessCpuCounter(int pid) {
+        try (BufferedReader reader = new BufferedReader(new FileReader("/proc/" + pid + "/stat"))) {
+            String line = reader.readLine();
+            int close = line == null ? -1 : line.lastIndexOf(')');
+            if (close < 0) return null;
+            String[] fields = line.substring(close + 2).trim().split("\\s+");
+            if (fields.length <= 19) return null;
+            long cpuTicks = Long.parseLong(fields[11]) + Long.parseLong(fields[12]);
+            long startTimeTicks = Long.parseLong(fields[19]);
+            return new ProcessCpuCounter(cpuTicks, startTimeTicks);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     private int percent(long used, long total) { return total <= 0 ? 0 : (int) Math.round(used * 100d / total); }
     private String uptimeText() {
         long hours = SystemClock.elapsedRealtime() / 3600000L;
@@ -3009,6 +3250,7 @@ public final class MainActivity extends Activity {
         else if ("双屏管理".equals(currentSection)) showDualScreenManager();
         else if ("局域网文件".equals(currentSection)) showLanFiles();
         else if ("文件分发".equals(currentSection)) showFileDistribution();
+        else if ("行为记录".equals(currentSection)) showBehaviorRecorder();
         else if ("清理后台".equals(currentSection)) refreshActivityMonitor(true);
         else if (currentDirectory != null) showDirectory(currentDirectory, currentSection, false);
     }
@@ -3178,6 +3420,7 @@ public final class MainActivity extends Activity {
         int pid;
         int importance;
         long memoryBytes;
+        double cpuPercent = -1;
         String processName = "";
         String label = "";
         String screenRole = "";
@@ -3228,7 +3471,19 @@ public final class MainActivity extends Activity {
         long listedProcessMemory;
         long systemSharedMemory;
         long applicationCacheBytes;
+        double listedProcessCpuPercent;
+        int measuredProcessCount;
         final List<ProcessEntry> processes = new ArrayList<>();
+    }
+
+    private static final class ProcessCpuCounter {
+        final long cpuTicks;
+        final long startTimeTicks;
+
+        ProcessCpuCounter(long cpuTicks, long startTimeTicks) {
+            this.cpuTicks = cpuTicks;
+            this.startTimeTicks = startTimeTicks;
+        }
     }
 
     private static final class CleanResult {

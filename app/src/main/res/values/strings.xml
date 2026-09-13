@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">KEMI Pads</string>
+    <string name="behavior_accessibility_description">记录应用切换、控件点击和滚动，用于在授权设备上复现问题；不记录输入文字或密码。</string>
 </resources>
