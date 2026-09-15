@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "KEMI-Pads"
 include(":app")
+include(":perfhelper")

@@ -1,0 +1,54 @@
+apply plugin: "com.android.application"
+
+def platformKeystorePath = System.getenv("KEMI_PLATFORM_KEYSTORE")
+def platformStorePassword = System.getenv("KEMI_PLATFORM_STORE_PASSWORD")
+def platformKeyAlias = System.getenv("KEMI_PLATFORM_KEY_ALIAS")
+def platformKeyPassword = System.getenv("KEMI_PLATFORM_KEY_PASSWORD")
+def platformSigningReady = platformKeystorePath != null && platformStorePassword != null
+        && platformKeyAlias != null && platformKeyPassword != null
+
+android {
+    namespace "com.kemi.mypad.perfhelper"
+    compileSdk 36
+    buildToolsVersion "36.0.0"
+
+    defaultConfig {
+        applicationId "com.kemi.mypad.perfhelper"
+        minSdk 31
+        targetSdk 31
+        versionCode 10000
+        versionName "1.0.0"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    signingConfigs {
+        if (platformSigningReady) {
+            platform {
+                storeFile file(platformKeystorePath)
+                storePassword platformStorePassword
+                keyAlias platformKeyAlias
+                keyPassword platformKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig platformSigningReady ? signingConfigs.platform : null
+        }
+    }
+
+    lint { disable "ProtectedPermissions" }
+}
+
+gradle.taskGraph.whenReady { graph ->
+    boolean release = graph.allTasks.any { it.path == ":perfhelper:assembleRelease" }
+    if (release && !platformSigningReady) {
+        throw new GradleException("Performance helper release requires KEMI platform signing")
+    }
+}

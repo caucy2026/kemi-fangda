@@ -1,6 +1,7 @@
 .gradle/
 build/
 app/build/
+perfhelper/build/
 local.properties
 *.iml
 .DS_Store

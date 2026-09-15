@@ -28,7 +28,7 @@ KEMI Pads 是为 KEMI 双屏 Android PAD 定制的一体化文件与系统管理
 - 基于设备系统权限通道读取每个 Display 的真实前台任务，不依赖安装目录
 - 全部应用支持主屏/副屏打开、清理缓存和卸载；系统应用与自身受到保护
 - 工具集提供百分之一秒秒表（数字与圆形表盘同步、计次）和双模式计算器（普通模式采用 Windows 计算器的上下文百分比规则；程序员模式支持 HEX、DEC、OCT、BIN、位宽与位运算）
-- CPU、内存、交换分区、存储、电池、温度、网络和活动进程监控；进程 CPU 占用按整机口径每 3 秒刷新；清理结果分别核算内存释放与磁盘缓存删除，不混算容量
+- CPU、内存、交换分区、存储、电池、温度、网络和活动进程监控；CPU 由绑定式采样服务按整机口径每 3 秒计算，直接 `/proc` 实测值与系统近期平均值分别标注，离开活动监控页面或退出 App 后立即销毁采样服务；点击任一进程可查看精确 PID 对应的 CPU、PSS、线程、调度、I/O、网络与安装详情；清理结果分别核算内存释放与磁盘缓存删除，不混算容量
 - 行为记录可在用户明确开启后开机常驻，关联双屏 App/Activity、控件操作、系统健康与崩溃/ANR 标记；记录包包含机器可读 JSONL、清单、校验值和供项目部/大模型阅读的时间线
 - 局域网 HTTP 文件浏览、下载和本机下载目录分发
 - KEMI Send 自动发现与收发入口
@@ -79,7 +79,13 @@ KEMI_PLATFORM_KEY_PASSWORD=你的密码 \
 ```text
 app/build/outputs/apk/debug/app-debug.apk
 app/build/outputs/apk/release/app-release.apk
+perfhelper/build/outputs/apk/release/perfhelper-release.apk
 ```
+
+`perfhelper-release.apk` 是无桌面图标的系统采样组件，使用同一平台证书并运行在
+`android.uid.system`。它只通过 signature 权限的 ContentProvider 向 KEMI Pads 返回 CPU 累计计数，
+用于跨 UID 隔离环境下的严格三秒进程差分。部署时先安装采样组件，再安装主 APK；
+主 App 自身仍保持独立 UID，不会因此清除原有用户数据。
 
 ## 安装
 
@@ -94,6 +100,12 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 系统能力来自与目标固件一致的平台证书，而不是 APK 文件名、安装目录或 `/system/xbin/su`。平台签名版即使安装在 `/data/app`，也能取得固件授予的 `REAL_GET_TASKS`、`DUMP`、`FORCE_STOP_PACKAGES` 等签名权限；应用通过 Android 系统 API 读取每个 Display 的真实前台任务和活动进程。目标设备上的 `su` 仅允许 root/shell 组执行，普通应用 UID 不具备该能力，因此业务代码不得依赖它。
 
 平台签名版在安装时即取得固件授予的系统权限，不要求用户进入设置页二次授权。清理前通过权威任务栈识别主屏和副屏前台进程；清理时仅终止普通后台进程，但会通过 Package Manager 清理所有应用的可删除缓存，并以清理后的 StorageStats 快照计算真实释放量。
+
+### 第二屏活动分析
+
+“系统设置 → 活动分析开关”使用一个状态按钮控制：绿色“已开启”、灰色“已关闭”。开启后，KEMI Pads 只在活动副屏创建一个半透明圆角悬浮窗，每 3 秒更新整机 8 核合计 CPU、各核心占用与实时频率、内存和交换分区。悬浮窗可自由拖动，位置会被记住；轻点后分页查看 App、系统服务、原生进程和内核线程，继续轻点翻页并在末页后折叠。
+
+CPU 总值与 `adb shell top` 使用相同的多核合计口径，8 核范围为 0–800%。普通 App 优先使用 `/proc/uid_cputime/show_uid_stat` 按 UID 汇总，系统 UID 与原生进程使用 `/proc/[pid]/stat`。关闭开关或从侧栏明确退出 KEMI Pads 后，窗口、采样线程和前台服务会一并停止；未连接副屏时不执行性能采样。
 
 ## 正式版本
 

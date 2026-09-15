@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sharedUserId="android.uid.system">
+
+    <permission
+        android:name="com.kemi.mypad.permission.PERFORMANCE_DATA"
+        android:protectionLevel="signature" />
+
+    <application
+        android:allowBackup="false"
+        android:directBootAware="true"
+        android:hasCode="true"
+        android:label="KEMI Pads 系统采样">
+        <provider
+            android:name=".PerformanceProvider"
+            android:authorities="com.kemi.mypad.performance"
+            android:directBootAware="true"
+            android:exported="true"
+            android:permission="com.kemi.mypad.permission.PERFORMANCE_DATA" />
+    </application>
+</manifest>

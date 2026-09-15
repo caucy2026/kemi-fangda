@@ -17,6 +17,8 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ComponentName;
+import android.content.ServiceConnection;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
@@ -39,6 +41,7 @@ import android.os.Debug;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.IBinder;
 import android.os.PowerManager;
 import android.os.StatFs;
 import android.os.SystemClock;
@@ -133,9 +136,9 @@ public final class MainActivity extends Activity {
     private TextView monitorStatus;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Map<String, Long> cleanedPackages = new ConcurrentHashMap<>();
-    private final Map<Integer, ProcessCpuCounter> previousProcessCpuCounters = new HashMap<>();
-    private long previousAggregateCpuTicks = -1;
     private long monitorGeneration;
+    private volatile ProcessCpuMonitorService.LocalBinder cpuMonitorBinder;
+    private boolean cpuMonitorBound;
     private Boolean lastUsbAvailable;
     private String lastUsbPath = "";
     private boolean usbWatcherRunning;
@@ -205,6 +208,24 @@ public final class MainActivity extends Activity {
             handler.postDelayed(this, 800);
         }
     };
+    private final ServiceConnection cpuMonitorConnection = new ServiceConnection() {
+        @Override public void onServiceConnected(ComponentName name, IBinder service) {
+            cpuMonitorBinder = (ProcessCpuMonitorService.LocalBinder) service;
+            if ("清理后台".equals(currentSection)) {
+                long generation = monitorGeneration;
+                handler.postDelayed(() -> {
+                    if (generation == monitorGeneration && "清理后台".equals(currentSection)) {
+                        refreshActivityMonitor(false);
+                    }
+                }, 120);
+            }
+        }
+
+        @Override public void onServiceDisconnected(ComponentName name) {
+            cpuMonitorBinder = null;
+            cpuMonitorBound = false;
+        }
+    };
 
     @Override
     protected void onCreate(Bundle state) {
@@ -215,6 +236,9 @@ public final class MainActivity extends Activity {
         setContentView(buildUi());
         ensureStorageAccess();
         showDownloads();
+        if (SystemPerformanceOverlayService.isEnabled(this) && !SystemPerformanceOverlayService.isRunning()) {
+            try { SystemPerformanceOverlayService.restoreIfEnabled(this); } catch (Exception ignored) { }
+        }
         if (BehaviorRecordStore.isEnabled(this) && !BehaviorRecorderService.isRunning()) {
             try { BehaviorRecorderService.start(this, "app_opened"); } catch (Exception ignored) { }
         }
@@ -231,6 +255,7 @@ public final class MainActivity extends Activity {
     @Override
     protected void onStart() {
         super.onStart();
+        if ("清理后台".equals(currentSection)) startProcessCpuMonitor();
         IntentFilter filter = new IntentFilter();
         filter.addAction(Intent.ACTION_MEDIA_MOUNTED);
         filter.addAction(Intent.ACTION_MEDIA_UNMOUNTED);
@@ -262,6 +287,7 @@ public final class MainActivity extends Activity {
 
     @Override
     protected void onStop() {
+        stopProcessCpuMonitor();
         usbWatcherRunning = false;
         handler.removeCallbacks(usbWatcher);
         if (usbReceiverRegistered) {
@@ -354,7 +380,7 @@ public final class MainActivity extends Activity {
         side.addView(sideButton("全部应用", "▦", this::showInstalledApps));
         side.addView(sideButton("工具集", "⌘", this::showTools));
         side.addView(sideButton("行为记录", "◉", this::showBehaviorRecorder));
-        side.addView(sideButton("系统设置", "⚙", this::openSystemSettings));
+        side.addView(sideButton("系统设置", "⚙", this::showSystemSettings));
         side.addView(sideButton("清理后台", "◌", this::showActivityMonitor));
         side.addView(sideButton("文件分发", "⌁", this::showFileDistribution));
         side.addView(sideButton("退出 KEMI Pads", "⏻", this::exitApplication));
@@ -485,6 +511,9 @@ public final class MainActivity extends Activity {
     }
 
     private void setActiveSection(String label) {
+        if ("清理后台".equals(currentSection) && !"清理后台".equals(label)) {
+            stopProcessCpuMonitor();
+        }
         if (!label.equals(currentSection)) monitorGeneration++;
         currentSection = label;
         for (Map.Entry<String, Button> entry : sidebarButtons.entrySet()) {
@@ -1869,8 +1898,79 @@ public final class MainActivity extends Activity {
         return String.format(Locale.CHINA, "%02d:%02d:%02d.%02d", hours, minutes, seconds, hundredths % 100);
     }
 
-    private void openSystemSettings() {
-        startActivity(new Intent(Settings.ACTION_SETTINGS));
+    private void showSystemSettings() {
+        setActiveSection("系统设置");
+        currentDirectory = null;
+        navigationRoot = null;
+        breadcrumbView.setText("系统  ›  系统设置");
+        useSectionToolbar(null, null, true);
+        refreshToolbarButton.setOnClickListener(v -> showSystemSettings());
+        headerView.setVisibility(View.GONE);
+        fileList.removeAllViews();
+
+        LinearLayout panel = vertical(Color.rgb(248, 250, 252));
+        panel.setPadding(dp(20), dp(18), dp(20), dp(18));
+        panel.setBackground(roundStroke(Color.rgb(248, 250, 252), BORDER, 16));
+
+        LinearLayout liveRow = horizontal(Color.TRANSPARENT);
+        liveRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout liveCopy = vertical(Color.TRANSPARENT);
+        liveCopy.addView(text("活动分析开关", 17, TEXT, true));
+        TextView liveDescription = text("开启后在第二屏最上层显示 CPU、实时频率、内存与进程负载；关闭后完全停止", 12, MUTED, false);
+        liveDescription.setPadding(0, dp(5), dp(16), 0);
+        liveCopy.addView(liveDescription);
+        liveRow.addView(liveCopy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        boolean analysisEnabled = SystemPerformanceOverlayService.isEnabled(this);
+        Button analysisToggle = new Button(this);
+        analysisToggle.setAllCaps(false);
+        analysisToggle.setText(analysisEnabled ? "已开启" : "已关闭");
+        analysisToggle.setTextSize(13);
+        analysisToggle.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        analysisToggle.setTextColor(analysisEnabled ? Color.WHITE : MUTED);
+        analysisToggle.setPadding(dp(16), 0, dp(16), 0);
+        analysisToggle.setBackground(ripple(analysisEnabled ? TEAL : Color.rgb(229, 234, 238), 18));
+        analysisToggle.setContentDescription(analysisEnabled ? "关闭活动分析" : "开启活动分析");
+        liveRow.addView(analysisToggle, new LinearLayout.LayoutParams(dp(104), dp(44)));
+        panel.addView(liveRow, lpMatch(dp(68)));
+
+        analysisToggle.setOnClickListener(button -> {
+            boolean enabled = !SystemPerformanceOverlayService.isEnabled(this);
+            try {
+                SystemPerformanceOverlayService.setEnabled(this, enabled);
+                analysisToggle.setText(enabled ? "已开启" : "已关闭");
+                analysisToggle.setTextColor(enabled ? Color.WHITE : MUTED);
+                analysisToggle.setBackground(ripple(enabled ? TEAL : Color.rgb(229, 234, 238), 18));
+                analysisToggle.setContentDescription(enabled ? "关闭活动分析" : "开启活动分析");
+            } catch (Exception error) {
+                footerRight.setText("系统悬浮窗权限未生效，无法切换活动分析");
+            }
+        });
+
+        LinearLayout divider = horizontal(BORDER);
+        LinearLayout.LayoutParams dividerLp = lpMatch(dp(1));
+        dividerLp.topMargin = dp(8);
+        dividerLp.bottomMargin = dp(14);
+        panel.addView(divider, dividerLp);
+
+        panel.addView(text("显示规则", 14, TEXT, true));
+        TextView rules = text("• 总 CPU 与 adb shell top 一致，按 8 核合计显示（0–800%）\n"
+                + "• 折叠状态只读取整机与各核心，不扫描进程\n"
+                + "• 轻点悬浮窗展开 App、系统服务和原生进程；再次轻点翻页\n"
+                + "• 关闭开关后立即移除窗口并停止全部周期任务", 12, MUTED, false);
+        rules.setLineSpacing(dp(3), 1f);
+        rules.setPadding(0, dp(9), 0, dp(14));
+        panel.addView(rules);
+
+        Button androidSettings = smallActionButton("打开 Android 系统设置", BLUE);
+        androidSettings.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_SETTINGS)));
+        panel.addView(androidSettings, new LinearLayout.LayoutParams(dp(210), dp(46)));
+
+        LinearLayout.LayoutParams panelLp = lpMatch(ViewGroup.LayoutParams.WRAP_CONTENT);
+        panelLp.setMargins(dp(8), dp(8), dp(8), dp(10));
+        fileList.addView(panel, panelLp);
+        footerLeft.setText("系统实时信息");
+        footerRight.setText(externalDisplayId() >= 0 ? "副屏已连接" : "等待副屏连接");
+        updateNavigationButtons();
     }
 
     private int externalDisplayId() {
@@ -1936,6 +2036,10 @@ public final class MainActivity extends Activity {
     }
 
     private void exitApplication() {
+        stopProcessCpuMonitor();
+        if (SystemPerformanceOverlayService.isEnabled(this) || SystemPerformanceOverlayService.isRunning()) {
+            try { SystemPerformanceOverlayService.setEnabled(this, false); } catch (Exception ignored) { }
+        }
         ActivityManager manager = getSystemService(ActivityManager.class);
         if (manager != null) {
             List<ActivityManager.AppTask> tasks = manager.getAppTasks();
@@ -2183,7 +2287,7 @@ public final class MainActivity extends Activity {
 
     private void showActivityMonitor() {
         setActiveSection("清理后台");
-        resetProcessCpuUsage();
+        startProcessCpuMonitor();
         currentDirectory = null;
         breadcrumbView.setText("系统  ›  活动监控");
         useSectionToolbar("一键清理", this::cleanBackgroundAnimated, true);
@@ -2194,6 +2298,28 @@ public final class MainActivity extends Activity {
         showMonitorLoading("正在分析后台程序…");
         loadMonitorSnapshot(generation, true);
         updateNavigationButtons();
+    }
+
+    private void startProcessCpuMonitor() {
+        if (cpuMonitorBound) return;
+        Intent intent = new Intent(this, ProcessCpuMonitorService.class);
+        cpuMonitorBound = bindService(intent, cpuMonitorConnection, Context.BIND_AUTO_CREATE);
+    }
+
+    private void stopProcessCpuMonitor() {
+        cpuMonitorBinder = null;
+        if (cpuMonitorBound) {
+            try { unbindService(cpuMonitorConnection); } catch (Exception ignored) { }
+            cpuMonitorBound = false;
+        }
+        // The service is bound-only, but the explicit stop also closes it if a
+        // firmware build restores it during task removal.
+        try { stopService(new Intent(this, ProcessCpuMonitorService.class)); } catch (Exception ignored) { }
+    }
+
+    private ProcessCpuMonitorService.Sample latestProcessCpuSample() {
+        ProcessCpuMonitorService.LocalBinder binder = cpuMonitorBinder;
+        return binder == null ? null : binder.latest();
     }
 
     private void refreshActivityMonitor(boolean showLoading) {
@@ -2250,31 +2376,44 @@ public final class MainActivity extends Activity {
         readMemoryDetails(snapshot);
         snapshot.applicationCacheBytes = installedApplicationCacheBytes(null);
         readDeviceDetails(snapshot);
-        float[] cpu = readCpuUsage();
-        snapshot.cpuPercent = cpu.length > 0 ? cpu[0] : 0;
-        snapshot.corePercents = cpu.length > 1 ? Arrays.copyOfRange(cpu, 1, cpu.length) : new float[0];
+        ProcessCpuMonitorService.Sample cpuSample = latestProcessCpuSample();
+        if (cpuSample != null && cpuSample.totalPercent >= 0) {
+            snapshot.cpuPercent = cpuSample.totalPercent;
+            snapshot.corePercents = cpuSample.corePercents.clone();
+            snapshot.cpuSampleReady = true;
+        }
         snapshot.coreFrequencies = readCoreFrequencies(snapshot.corePercents.length);
         StatFs storage = new StatFs(Environment.getExternalStorageDirectory().getAbsolutePath());
         snapshot.totalStorage = storage.getTotalBytes();
         snapshot.availableStorage = storage.getAvailableBytes();
         List<ActivityManager.RunningAppProcessInfo> processes = manager.getRunningAppProcesses();
         if (processes != null) {
+            Map<Integer, ProcessEntry> entriesByPid = new HashMap<>();
             for (ActivityManager.RunningAppProcessInfo process : processes) {
                 ProcessEntry entry = new ProcessEntry();
                 entry.pid = process.pid;
                 entry.processName = process.processName;
                 entry.packages = process.pkgList == null ? new String[0] : process.pkgList;
                 entry.importance = process.importance;
-                try {
-                    Debug.MemoryInfo[] details = manager.getProcessMemoryInfo(new int[]{process.pid});
-                    if (details.length > 0) entry.memoryBytes = details[0].getTotalPss() * 1024L;
-                } catch (Exception ignored) { }
                 entry.label = appLabel(entry.packages, entry.processName);
                 entry.screenRole = screenRole(entry.packages, screenApps);
                 entry.protectedEntry = isProtectedPackages(entry.packages);
                 entry.cleanable = isCleanable(entry);
                 entry.analysisReason = processReason(entry);
                 snapshot.processes.add(entry);
+                entriesByPid.put(entry.pid, entry);
+            }
+            try {
+                int[] pids = new int[entriesByPid.size()];
+                int index = 0;
+                for (int pid : entriesByPid.keySet()) pids[index++] = pid;
+                Debug.MemoryInfo[] details = manager.getProcessMemoryInfo(pids);
+                for (int i = 0; i < Math.min(pids.length, details.length); i++) {
+                    ProcessEntry entry = entriesByPid.get(pids[i]);
+                    if (entry != null) entry.memoryBytes = details[i].getTotalPss() * 1024L;
+                }
+            } catch (Exception ignored) {
+                // CPU/process rows remain useful when one firmware build withholds PSS.
             }
         }
         snapshot.usageAccess = hasUsageAccess();
@@ -2289,7 +2428,10 @@ public final class MainActivity extends Activity {
                 }
             }
         }
-        snapshot.processes.sort((a, b) -> Long.compare(b.memoryBytes, a.memoryBytes));
+        snapshot.processes.sort((a, b) -> {
+            int cpuOrder = Double.compare(b.cpuPercent, a.cpuPercent);
+            return cpuOrder != 0 ? cpuOrder : Long.compare(b.memoryBytes, a.memoryBytes);
+        });
         for (ProcessEntry entry : snapshot.processes) snapshot.listedProcessMemory += Math.max(0, entry.memoryBytes);
         long usedMemory = Math.max(0, snapshot.totalMemory - snapshot.availableMemory);
         snapshot.systemSharedMemory = Math.max(0, usedMemory - snapshot.listedProcessMemory);
@@ -2507,12 +2649,24 @@ public final class MainActivity extends Activity {
         metrics.setPadding(dp(4), dp(6), dp(4), dp(12));
         long usedMemory = snapshot.totalMemory - snapshot.availableMemory;
         long usedStorage = snapshot.totalStorage - snapshot.availableStorage;
+        String processCpuWindow;
+        if (snapshot.averageProcessCount > 0 && snapshot.directProcessCount > 0) {
+            processCpuWindow = snapshot.directProcessCount + " 项 3 秒实测 · "
+                    + snapshot.averageProcessCount + " 项系统 "
+                    + cpuWindowText(snapshot.cpuInfoWindowMillis) + "平均";
+        } else if (snapshot.averageProcessCount > 0) {
+            processCpuWindow = "系统 " + cpuWindowText(snapshot.cpuInfoWindowMillis) + "平均";
+        } else {
+            processCpuWindow = "3 秒实测";
+        }
         String processCpuSummary = snapshot.measuredProcessCount > 0
-                ? String.format(Locale.CHINA, "进程合计 %.1f%% · 3 秒刷新", snapshot.listedProcessCpuPercent)
+                ? String.format(Locale.CHINA, "进程合计 %.1f%% · %s", snapshot.listedProcessCpuPercent, processCpuWindow)
                 : "进程占用正在采样";
-        metrics.addView(metricCard("CPU", String.format(Locale.CHINA, "%.0f%%", snapshot.cpuPercent),
+        String cpuValue = snapshot.cpuSampleReady
+                ? String.format(Locale.CHINA, "%.0f%%", snapshot.cpuPercent) : "采样中";
+        metrics.addView(metricCard("CPU", cpuValue,
                 snapshot.corePercents.length + " 核实时负载 · " + processCpuSummary,
-                snapshot.cpuPercent < 80 ? TEAL : Color.rgb(230, 126, 34)), weightedCard());
+                !snapshot.cpuSampleReady || snapshot.cpuPercent < 80 ? TEAL : Color.rgb(230, 126, 34)), weightedCard());
         metrics.addView(metricCard("内存", "6 GB + 2 GB", formatBytes(usedMemory) + " 占用 · 列表 PSS " + formatBytes(snapshot.listedProcessMemory), snapshot.lowMemory ? Color.rgb(220, 70, 70) : TEAL), weightedCard());
         metrics.addView(metricCard("存储", formatBytes(usedStorage) + " / " + formatBytes(snapshot.totalStorage), formatBytes(snapshot.availableStorage) + " 可用", percent(usedStorage, snapshot.totalStorage) > 90 ? Color.rgb(220, 70, 70) : BLUE), weightedCard());
         String stability = snapshot.lowMemory || percent(usedStorage, snapshot.totalStorage) > 94 || snapshot.cpuPercent > 92 ? "需要关注" : "运行稳定";
@@ -2535,7 +2689,7 @@ public final class MainActivity extends Activity {
             fileList.addView(processRow(entry), lpMatch(dp(68)));
         }
         footerLeft.setText(snapshot.processes.size() + " 个活动进程 · " + cleanable + " 个可清理" + (cleaned > 0 ? " · " + cleaned + " 个已清理" : ""));
-        footerRight.setText("CPU 按进程统计 · 每 3 秒刷新 · 主屏、副屏、服务和系统进程全部保留");
+        footerRight.setText("CPU 监控仅随本页面运行 · 离开或退出立即关闭采样服务");
     }
 
     private View screenProtectionPanel(MonitorSnapshot snapshot) {
@@ -2608,8 +2762,14 @@ public final class MainActivity extends Activity {
         LinearLayout panel = vertical(Color.TRANSPARENT);
         panel.setPadding(dp(8), dp(4), dp(8), dp(8));
         panel.addView(text("CPU 各核心实时占用", 11, MUTED, true), lpMatch(dp(24)));
+        if (cores.length == 0) {
+            TextView waiting = centerText("正在建立 3 秒采样基线…", 12, MUTED, false);
+            waiting.setBackground(roundStroke(Color.rgb(248, 250, 252), BORDER, 9));
+            panel.addView(waiting, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+            return panel;
+        }
         LinearLayout cells = horizontal(Color.TRANSPARENT);
-        int count = cores.length == 0 ? 8 : cores.length;
+        int count = cores.length;
         for (int i = 0; i < count; i++) {
             float usage = cores.length > i ? cores[i] : 0;
             int accent = usage > 85 ? Color.rgb(220, 70, 70) : usage > 60 ? Color.rgb(230, 153, 45) : TEAL;
@@ -2852,7 +3012,7 @@ public final class MainActivity extends Activity {
         header.setPadding(dp(38), 0, dp(8), 0);
         header.addView(text("进程名称", 11, MUTED, false), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         header.addView(text("内存 (PSS)", 11, MUTED, false), new LinearLayout.LayoutParams(dp(110), ViewGroup.LayoutParams.WRAP_CONTENT));
-        header.addView(text("CPU", 11, MUTED, false), new LinearLayout.LayoutParams(dp(76), ViewGroup.LayoutParams.WRAP_CONTENT));
+        header.addView(text("CPU ↓", 11, MUTED, false), new LinearLayout.LayoutParams(dp(76), ViewGroup.LayoutParams.WRAP_CONTENT));
         header.addView(text("PID", 11, MUTED, false), new LinearLayout.LayoutParams(dp(80), ViewGroup.LayoutParams.WRAP_CONTENT));
         TextView result = text("清理判定", 11, MUTED, false); result.setGravity(Gravity.CENTER);
         header.addView(result, new LinearLayout.LayoutParams(dp(230), ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -2899,14 +3059,23 @@ public final class MainActivity extends Activity {
 
     private View processRow(ProcessEntry entry) {
         LinearLayout row = horizontal(Color.TRANSPARENT); row.setGravity(Gravity.CENTER_VERTICAL); row.setPadding(dp(8), dp(3), dp(8), dp(3)); row.setBackground(ripple(Color.TRANSPARENT, 8));
+        if (entry.pid > 0) {
+            row.setClickable(true);
+            row.setFocusable(true);
+            row.setContentDescription("查看" + entry.label + "进程详细信息");
+            row.setOnClickListener(v -> new ProcessInspectorDialog(this, entry.pid,
+                    entry.processName, entry.label, entry.packages).show());
+        }
         TextView dot = text("●", 11, entry.cleanable ? Color.rgb(230, 153, 45) : TEAL, false); dot.setGravity(Gravity.CENTER); row.addView(dot, new LinearLayout.LayoutParams(dp(30), ViewGroup.LayoutParams.MATCH_PARENT));
         LinearLayout labels = vertical(Color.TRANSPARENT); labels.setGravity(Gravity.CENTER_VERTICAL); labels.addView(text(entry.label, 13, TEXT, true));
         if (!entry.label.equals(entry.processName)) labels.addView(text(entry.processName, 9, MUTED, false));
         row.addView(labels, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
         row.addView(text(entry.memoryBytes > 0 ? formatBytes(entry.memoryBytes) : "系统未公开", 12, MUTED, false), new LinearLayout.LayoutParams(dp(110), ViewGroup.LayoutParams.WRAP_CONTENT));
         String cpu = entry.cpuPercent < 0 ? (entry.pid > 0 ? "采样中" : "—")
-                : String.format(Locale.CHINA, "%.1f%%", entry.cpuPercent);
-        row.addView(text(cpu, 12, entry.cpuPercent >= 20 ? Color.rgb(220, 92, 55) : MUTED, entry.cpuPercent >= 20),
+                : String.format(Locale.CHINA, entry.cpuIsSystemAverage ? "≈ %.1f%%" : "%.1f%%", entry.cpuPercent);
+        int cpuColor = entry.cpuPercent >= 25 ? Color.rgb(210, 70, 55)
+                : entry.cpuPercent >= 10 ? Color.rgb(208, 125, 25) : MUTED;
+        row.addView(text(cpu, 12, cpuColor, entry.cpuPercent >= 10),
                 new LinearLayout.LayoutParams(dp(76), ViewGroup.LayoutParams.WRAP_CONTENT));
         row.addView(text(entry.pid > 0 ? String.valueOf(entry.pid) : "—", 12, MUTED, false), new LinearLayout.LayoutParams(dp(80), ViewGroup.LayoutParams.WRAP_CONTENT));
         LinearLayout analysis = vertical(Color.TRANSPARENT);
@@ -3068,101 +3237,80 @@ public final class MainActivity extends Activity {
         return "保留";
     }
 
-    private float[] readCpuUsage() {
-        List<long[]> first = readCpuTimes();
-        SystemClock.sleep(220);
-        List<long[]> second = readCpuTimes();
-        int count = Math.min(first.size(), second.size());
-        float[] result = new float[count];
-        for (int i = 0; i < count; i++) {
-            long total = second.get(i)[0] - first.get(i)[0];
-            long idle = second.get(i)[1] - first.get(i)[1];
-            result[i] = total <= 0 ? 0 : Math.max(0, Math.min(100, (total - idle) * 100f / total));
-        }
-        return result;
-    }
-
-    private List<long[]> readCpuTimes() {
-        List<long[]> result = new ArrayList<>();
-        try (BufferedReader reader = new BufferedReader(new FileReader("/proc/stat"))) {
-            String line;
-            while ((line = reader.readLine()) != null && line.startsWith("cpu")) {
-                String[] parts = line.trim().split("\\s+");
-                long total = 0;
-                for (int i = 1; i < parts.length; i++) total += Long.parseLong(parts[i]);
-                long idle = Long.parseLong(parts[4]) + (parts.length > 5 ? Long.parseLong(parts[5]) : 0);
-                result.add(new long[]{total, idle});
-            }
-        } catch (Exception ignored) { }
-        return result;
-    }
-
-    private synchronized void resetProcessCpuUsage() {
-        previousAggregateCpuTicks = -1;
-        previousProcessCpuCounters.clear();
-    }
-
     /**
      * Calculates each process as a share of the whole device CPU capacity. The
      * values therefore add up to the CPU card instead of reporting 100% per core.
      */
     private synchronized void applyProcessCpuUsage(MonitorSnapshot snapshot) {
-        long aggregateTicks = readAggregateCpuTicks();
-        if (aggregateTicks < 0) return;
-        long aggregateDelta = previousAggregateCpuTicks < 0 ? -1 : aggregateTicks - previousAggregateCpuTicks;
-        Map<Integer, ProcessCpuCounter> current = new HashMap<>();
+        ProcessCpuMonitorService.Sample sample = latestProcessCpuSample();
+        if (sample == null || !sample.ready()) return;
+        snapshot.cpuInfoWindowMillis = sample.systemWindowMillis;
+        snapshot.cpuInfoReadMillis = sample.systemReadMillis;
+        snapshot.cpuInfoError = sample.systemError;
+
+        Map<Integer, ProcessEntry> rows = new HashMap<>();
         for (ProcessEntry entry : snapshot.processes) {
             entry.cpuPercent = -1;
-            if (entry.pid <= 0) continue;
-            ProcessCpuCounter counter = readProcessCpuCounter(entry.pid);
-            if (counter == null) continue;
-            current.put(entry.pid, counter);
-            ProcessCpuCounter previous = previousProcessCpuCounters.get(entry.pid);
-            if (previous == null || previous.startTimeTicks != counter.startTimeTicks) continue;
-            double percent = ProcessCpuUsage.percent(counter.cpuTicks - previous.cpuTicks, aggregateDelta);
-            if (percent >= 0) {
-                entry.cpuPercent = percent;
-                snapshot.listedProcessCpuPercent += percent;
+            if (entry.pid > 0) rows.put(entry.pid, entry);
+        }
+        for (Map.Entry<Integer, ProcessCpuMonitorService.ProcessValue> measured : sample.processes.entrySet()) {
+            int pid = measured.getKey();
+            ProcessCpuMonitorService.ProcessValue value = measured.getValue();
+            ProcessEntry entry = rows.get(pid);
+            if (entry == null) {
+                entry = processEntryFromCpuSample(pid, value.name);
+                snapshot.processes.add(entry);
+                rows.put(pid, entry);
+            }
+            entry.cpuPercent = value.percent;
+            entry.cpuIsSystemAverage = value.systemAverage;
+            snapshot.listedProcessCpuPercent += value.percent;
+            snapshot.measuredProcessCount++;
+            if (value.systemAverage) snapshot.averageProcessCount++;
+            else snapshot.directProcessCount++;
+        }
+        if (sample.systemError.isEmpty() && !sample.processes.isEmpty()) {
+            for (ProcessEntry entry : snapshot.processes) {
+                if (entry.pid <= 0 || entry.cpuPercent >= 0) continue;
+                entry.cpuPercent = 0d;
+                entry.cpuIsSystemAverage = true;
                 snapshot.measuredProcessCount++;
             }
         }
-        previousAggregateCpuTicks = aggregateTicks;
-        previousProcessCpuCounters.clear();
-        previousProcessCpuCounters.putAll(current);
     }
 
-    private long readAggregateCpuTicks() {
-        try (BufferedReader reader = new BufferedReader(new FileReader("/proc/stat"))) {
-            String line = reader.readLine();
-            if (line == null || !line.startsWith("cpu ")) return -1;
-            String[] fields = line.trim().split("\\s+");
-            long total = 0;
-            for (int i = 1; i < fields.length; i++) total += Long.parseLong(fields[i]);
-            return total;
+    private ProcessEntry processEntryFromCpuSample(int pid, String processName) {
+        ProcessEntry entry = new ProcessEntry();
+        entry.pid = pid;
+        entry.processName = processName;
+        entry.importance = ActivityManager.RunningAppProcessInfo.IMPORTANCE_CACHED;
+        String packageName = processName;
+        int suffix = packageName.indexOf(':');
+        if (suffix > 0) packageName = packageName.substring(0, suffix);
+        try {
+            getPackageManager().getApplicationInfo(packageName, 0);
+            entry.packages = new String[]{packageName};
         } catch (Exception ignored) {
-            return -1;
+            entry.packages = new String[0];
         }
-    }
-
-    private ProcessCpuCounter readProcessCpuCounter(int pid) {
-        try (BufferedReader reader = new BufferedReader(new FileReader("/proc/" + pid + "/stat"))) {
-            String line = reader.readLine();
-            int close = line == null ? -1 : line.lastIndexOf(')');
-            if (close < 0) return null;
-            String[] fields = line.substring(close + 2).trim().split("\\s+");
-            if (fields.length <= 19) return null;
-            long cpuTicks = Long.parseLong(fields[11]) + Long.parseLong(fields[12]);
-            long startTimeTicks = Long.parseLong(fields[19]);
-            return new ProcessCpuCounter(cpuTicks, startTimeTicks);
-        } catch (Exception ignored) {
-            return null;
-        }
+        entry.label = appLabel(entry.packages, processName);
+        entry.protectedEntry = true;
+        entry.cleanable = false;
+        entry.analysisReason = entry.packages.length == 0
+                ? "系统进程，仅监控" : "系统采样补充进程，保留";
+        return entry;
     }
 
     private int percent(long used, long total) { return total <= 0 ? 0 : (int) Math.round(used * 100d / total); }
     private String uptimeText() {
         long hours = SystemClock.elapsedRealtime() / 3600000L;
         return hours < 24 ? hours + " 小时" : (hours / 24) + " 天";
+    }
+
+    private String cpuWindowText(long millis) {
+        if (millis <= 0) return "近期";
+        if (millis < 60_000) return Math.max(1, millis / 1000) + " 秒";
+        return Math.max(1, millis / 60_000) + " 分钟";
     }
 
     private void showSearchDialog() {
@@ -3430,6 +3578,7 @@ public final class MainActivity extends Activity {
         long lastUsed;
         boolean protectedEntry;
         boolean cleaned;
+        boolean cpuIsSystemAverage;
     }
 
     private static final class MonitorSnapshot {
@@ -3473,17 +3622,13 @@ public final class MainActivity extends Activity {
         long applicationCacheBytes;
         double listedProcessCpuPercent;
         int measuredProcessCount;
+        int directProcessCount;
+        int averageProcessCount;
+        boolean cpuSampleReady;
+        long cpuInfoWindowMillis = -1;
+        long cpuInfoReadMillis;
+        String cpuInfoError = "";
         final List<ProcessEntry> processes = new ArrayList<>();
-    }
-
-    private static final class ProcessCpuCounter {
-        final long cpuTicks;
-        final long startTimeTicks;
-
-        ProcessCpuCounter(long cpuTicks, long startTimeTicks) {
-            this.cpuTicks = cpuTicks;
-            this.startTimeTicks = startTimeTicks;
-        }
     }
 
     private static final class CleanResult {

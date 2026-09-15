@@ -18,8 +18,11 @@ import android.view.Display;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileReader;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -55,7 +58,19 @@ final class SystemPrivilege {
         String vmRss = "";
         String vmSwap = "";
         String fdCount = "";
+        String oomScoreAdj = "";
+        String voluntaryContextSwitches = "";
+        String involuntaryContextSwitches = "";
+        String commandLine = "";
         long cpuTicks = -1;
+        long startTimeTicks = -1;
+        long ioReadBytes = -1;
+        long ioWriteBytes = -1;
+        int priority;
+        int nice;
+        int processor = -1;
+        boolean visibleToActivityManager;
+        boolean procReadable;
         int totalPssKb;
         int totalPrivateDirtyKb;
         int totalSharedDirtyKb;
@@ -66,6 +81,14 @@ final class SystemPrivilege {
         String graphicsKb = "";
 
         boolean running() { return pid > 0; }
+    }
+
+    static final class CpuInfoSnapshot {
+        final Map<Integer, Double> machinePercentByPid = new HashMap<>();
+        final Map<Integer, String> processNameByPid = new HashMap<>();
+        long windowMillis = -1;
+        long readMillis;
+        String error = "";
     }
 
     private SystemPrivilege() { }
@@ -131,6 +154,7 @@ final class SystemPrivilege {
                     result.importance = process.importance;
                     result.importanceReasonCode = process.importanceReasonCode;
                     result.lru = process.lru;
+                    result.visibleToActivityManager = true;
                 }
             }
             if (result.pid > 0) {
@@ -152,17 +176,59 @@ final class SystemPrivilege {
         return result;
     }
 
+    /** Reads one exact PID so a selected row never changes to a sibling process. */
+    static ProcessDetails inspectProcess(Context context, int pid) {
+        ProcessDetails result = new ProcessDetails();
+        if (pid <= 0) return result;
+        result.pid = pid;
+        ActivityManager manager = context.getSystemService(ActivityManager.class);
+        if (manager == null) return result;
+        try {
+            java.util.List<ActivityManager.RunningAppProcessInfo> running = manager.getRunningAppProcesses();
+            if (running != null) for (ActivityManager.RunningAppProcessInfo process : running) {
+                if (process.pid != pid) continue;
+                result.uid = process.uid;
+                result.processName = process.processName;
+                result.importance = process.importance;
+                result.importanceReasonCode = process.importanceReasonCode;
+                result.lru = process.lru;
+                result.visibleToActivityManager = true;
+                break;
+            }
+            Debug.MemoryInfo[] memory = manager.getProcessMemoryInfo(new int[]{pid});
+            if (memory.length > 0) fillMemoryDetails(result, memory[0]);
+            readProcDetails(result);
+        } catch (Exception ignored) { }
+        return result;
+    }
+
+    private static void fillMemoryDetails(ProcessDetails result, Debug.MemoryInfo info) {
+        result.totalPssKb = info.getTotalPss();
+        result.totalPrivateDirtyKb = info.getTotalPrivateDirty();
+        result.totalSharedDirtyKb = info.getTotalSharedDirty();
+        result.javaHeapKb = info.getMemoryStat("summary.java-heap");
+        result.nativeHeapKb = info.getMemoryStat("summary.native-heap");
+        result.codeKb = info.getMemoryStat("summary.code");
+        result.stackKb = info.getMemoryStat("summary.stack");
+        result.graphicsKb = info.getMemoryStat("summary.graphics");
+    }
+
     private static void readProcDetails(ProcessDetails result) {
         File directory = new File("/proc/" + result.pid);
         try (BufferedReader reader = new BufferedReader(new FileReader(new File(directory, "status")))) {
+            result.procReadable = true;
             String line;
             while ((line = reader.readLine()) != null) {
-                if (line.startsWith("State:")) result.state = afterColon(line);
+                if (line.startsWith("Name:") && result.processName.isEmpty()) result.processName = afterColon(line);
+                else if (line.startsWith("Uid:") && result.uid <= 0) result.uid = firstNumberAfterColon(line);
+                else if (line.startsWith("State:")) result.state = afterColon(line);
                 else if (line.startsWith("Threads:")) result.threads = afterColon(line);
                 else if (line.startsWith("PPid:")) result.ppid = afterColon(line);
                 else if (line.startsWith("VmSize:")) result.vmSize = afterColon(line);
                 else if (line.startsWith("VmRSS:")) result.vmRss = afterColon(line);
                 else if (line.startsWith("VmSwap:")) result.vmSwap = afterColon(line);
+                else if (line.startsWith("voluntary_ctxt_switches:")) result.voluntaryContextSwitches = afterColon(line);
+                else if (line.startsWith("nonvoluntary_ctxt_switches:")) result.involuntaryContextSwitches = afterColon(line);
             }
         } catch (Exception ignored) { }
         try {
@@ -174,9 +240,91 @@ final class SystemPrivilege {
             int close = line == null ? -1 : line.lastIndexOf(')');
             if (close > 0) {
                 String[] fields = line.substring(close + 2).split("\\s+");
-                if (fields.length > 12) result.cpuTicks = Long.parseLong(fields[11]) + Long.parseLong(fields[12]);
+                if (fields.length > 19) {
+                    result.cpuTicks = Long.parseLong(fields[11]) + Long.parseLong(fields[12]);
+                    result.priority = Integer.parseInt(fields[15]);
+                    result.nice = Integer.parseInt(fields[16]);
+                    result.startTimeTicks = Long.parseLong(fields[19]);
+                    if (fields.length > 36) result.processor = Integer.parseInt(fields[36]);
+                }
             }
         } catch (Exception ignored) { }
+        result.oomScoreAdj = readFirstLine(new File(directory, "oom_score_adj"));
+        result.commandLine = readCommandLine(new File(directory, "cmdline"));
+        try (BufferedReader reader = new BufferedReader(new FileReader(new File(directory, "io")))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line.startsWith("read_bytes:")) result.ioReadBytes = parseLongAfterColon(line);
+                else if (line.startsWith("write_bytes:")) result.ioWriteBytes = parseLongAfterColon(line);
+            }
+        } catch (Exception ignored) { }
+    }
+
+    static long aggregateCpuTicks() {
+        try (BufferedReader reader = new BufferedReader(new FileReader("/proc/stat"))) {
+            String line = reader.readLine();
+            if (line == null || !line.startsWith("cpu ")) return -1;
+            String[] fields = line.trim().split("\\s+");
+            long total = 0;
+            for (int i = 1; i < fields.length; i++) total += Long.parseLong(fields[i]);
+            return total;
+        } catch (Exception ignored) { return -1; }
+    }
+
+    /** Uses Android's privileged cpuinfo service when per-PID /proc is isolated by SELinux. */
+    static CpuInfoSnapshot processCpuInfo() {
+        CpuInfoSnapshot snapshot = new CpuInfoSnapshot();
+        long started = android.os.SystemClock.elapsedRealtime();
+        int cores = Math.max(1, Runtime.getRuntime().availableProcessors());
+        try {
+            Process process = new ProcessBuilder("/system/bin/dumpsys", "cpuinfo")
+                    .redirectErrorStream(true).start();
+            java.util.ArrayList<String> lines = new java.util.ArrayList<>();
+            try (BufferedReader reader = new BufferedReader(new java.io.InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) lines.add(line);
+            }
+            CpuInfoParser.Result parsed = CpuInfoParser.parse(lines, cores);
+            snapshot.windowMillis = parsed.windowMillis;
+            snapshot.machinePercentByPid.putAll(parsed.machinePercentByPid);
+            snapshot.processNameByPid.putAll(parsed.processNameByPid);
+            if (!process.waitFor(2, TimeUnit.SECONDS) || process.exitValue() != 0) {
+                process.destroy();
+                snapshot.error = "cpuinfo 服务未响应";
+            } else if (snapshot.machinePercentByPid.isEmpty()) {
+                snapshot.error = "cpuinfo 未返回进程数据";
+            }
+        } catch (Exception error) {
+            snapshot.error = error.getClass().getSimpleName();
+        }
+        snapshot.readMillis = android.os.SystemClock.elapsedRealtime() - started;
+        return snapshot;
+    }
+
+    private static String readFirstLine(File file) {
+        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+            String value = reader.readLine();
+            return value == null ? "" : value.trim();
+        } catch (Exception ignored) { return ""; }
+    }
+
+    private static String readCommandLine(File file) {
+        try (FileInputStream input = new FileInputStream(file)) {
+            byte[] buffer = new byte[1024];
+            int count = input.read(buffer);
+            return count <= 0 ? "" : new String(buffer, 0, count, StandardCharsets.UTF_8)
+                    .replace('\u0000', ' ').trim();
+        } catch (Exception ignored) { return ""; }
+    }
+
+    private static long parseLongAfterColon(String value) {
+        try { return Long.parseLong(afterColon(value)); }
+        catch (Exception ignored) { return -1; }
+    }
+
+    private static int firstNumberAfterColon(String value) {
+        try { return Integer.parseInt(afterColon(value).split("\\s+")[0]); }
+        catch (Exception ignored) { return 0; }
     }
 
     private static String afterColon(String value) {
