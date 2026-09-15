@@ -1915,7 +1915,7 @@ public final class MainActivity extends Activity {
         LinearLayout liveRow = horizontal(Color.TRANSPARENT);
         liveRow.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout liveCopy = vertical(Color.TRANSPARENT);
-        liveCopy.addView(text("活动分析开关", 17, TEXT, true));
+        liveCopy.addView(text("系统状态监控", 17, TEXT, true));
         TextView liveDescription = text("开启后在第二屏最上层显示 CPU、实时频率、内存与进程负载；关闭后完全停止", 12, MUTED, false);
         liveDescription.setPadding(0, dp(5), dp(16), 0);
         liveCopy.addView(liveDescription);
@@ -1929,7 +1929,7 @@ public final class MainActivity extends Activity {
         analysisToggle.setTextColor(analysisEnabled ? Color.WHITE : MUTED);
         analysisToggle.setPadding(dp(16), 0, dp(16), 0);
         analysisToggle.setBackground(ripple(analysisEnabled ? TEAL : Color.rgb(229, 234, 238), 18));
-        analysisToggle.setContentDescription(analysisEnabled ? "关闭活动分析" : "开启活动分析");
+        analysisToggle.setContentDescription(analysisEnabled ? "关闭系统状态监控" : "开启系统状态监控");
         liveRow.addView(analysisToggle, new LinearLayout.LayoutParams(dp(104), dp(44)));
         panel.addView(liveRow, lpMatch(dp(68)));
 
@@ -1940,9 +1940,9 @@ public final class MainActivity extends Activity {
                 analysisToggle.setText(enabled ? "已开启" : "已关闭");
                 analysisToggle.setTextColor(enabled ? Color.WHITE : MUTED);
                 analysisToggle.setBackground(ripple(enabled ? TEAL : Color.rgb(229, 234, 238), 18));
-                analysisToggle.setContentDescription(enabled ? "关闭活动分析" : "开启活动分析");
+                analysisToggle.setContentDescription(enabled ? "关闭系统状态监控" : "开启系统状态监控");
             } catch (Exception error) {
-                footerRight.setText("系统悬浮窗权限未生效，无法切换活动分析");
+                footerRight.setText("系统悬浮窗权限未生效，无法切换系统状态监控");
             }
         });
 
